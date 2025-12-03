@@ -17,6 +17,13 @@ import torch
 
 from torch._inductor.decomposition import register_decomposition
 
+# List of decompositions to be re-defined in this file
+decomps_to_exclude = [
+    torch.ops.aten.new_ones,
+]
+torch._decomp.remove_decompositions(
+    torch._inductor.decomposition.decompositions, decomps_to_exclude
+)
 
 @register_decomposition([torch.ops.spyre.compact])
 def compact_decomp(x: torch.Tensor) -> torch.Tensor:
