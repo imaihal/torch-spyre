@@ -25,6 +25,7 @@ torch._decomp.remove_decompositions(
     torch._inductor.decomposition.decompositions, decomps_to_exclude
 )
 
+
 @register_decomposition([torch.ops.spyre.compact])
 def compact_decomp(x: torch.Tensor) -> torch.Tensor:
     return torch.ops.spyre.slice(torch.ops.spyre.swap(x))
