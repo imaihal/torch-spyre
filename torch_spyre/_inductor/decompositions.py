@@ -19,6 +19,8 @@ from torch._inductor.decomposition import register_decomposition
 
 # List of decompositions to be re-defined in this file
 decomps_to_exclude = [
+    # Avoid decomposition using aten.full which is not supported in eager runtime.
+    # Fallback to CPU using aten.fill_ through eager runtime.
     torch.ops.aten.new_ones,
 ]
 torch._decomp.remove_decompositions(
