@@ -487,6 +487,7 @@ at::Tensor spyre__clone_default(
 }
 
 at::Tensor &spyre__fill_Scalar(at::Tensor &self, const at::Scalar &other) {
+  DEBUGINFO("IMAIHAL call spyre_fill_Scalar");
   DEBUGINFO("Tensor is on: ", self.device());
   at::Tensor tmp = (at::ones(self.sizes(), self.dtype()) * other);
   self = spyre::spyre_copy_from(tmp, self, false);
