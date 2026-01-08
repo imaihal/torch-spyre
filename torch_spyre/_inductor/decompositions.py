@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
+
 import torch
 
 from torch._inductor.decomposition import register_decomposition
@@ -34,6 +35,30 @@ def layernorm_decomp(
     mean = torch.ops.spyre.exx2(input, 1.0 / normalized_shape[0], False)
     norm_mean = torch.ops.spyre.layernormscale(mean, eps)
     return torch.ops.spyre.layernormnorm(input, mean, norm_mean, weight, bias)
+
+
+# TODO (imaihal): Inductor applies constant folding to torch.full, which allocates
+# a one-element Spyre tensor. This currently fails because Spyre does not handle
+# single-element tensors well.
+# Ref: https://github.com/pytorch/pytorch/blob/v2.9.1/torch/_inductor/fx_passes/joint_graph.py#L324-L335
+#
+# To avoid constant folding, we introduce a custom op `spyre::full` that runs
+# torch.full on CPU and copies the result to Spyre. Remove this workaround once
+# Spyre supports one-element tensors.
+@register_decomposition([torch.ops.aten.full])
+def full_decomp(
+    size: list[Union[int, torch.SymInt]],
+    fill_value: torch.types.Number,
+    dtype: Optional[torch.dtype] = None,
+    layout: Optional[torch.layout] = None,
+    device: Optional[torch.device] = None,
+    pin_memory: Optional[bool] = None,
+) -> torch.Tensor:
+    assert layout == torch.strided or layout is None, f"dosn't support layout={layout}"
+    assert pin_memory == False or pin_memory is None, (
+        f"dosn't support pin_memory={pin_memory}"
+    )
+    return torch.ops.spyre.full(size, fill_value, device, dtype=dtype)
 
 
 """
