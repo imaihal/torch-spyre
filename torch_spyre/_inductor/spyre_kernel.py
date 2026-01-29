@@ -312,6 +312,14 @@ def create_kernel_spec(
             torch.float32,
         ]:
             raise Unsupported(f"operations on {arg.dtype} dtype")
+    print(f"IMAIHAL create_kernel_spec:")
+    print(f" IMAIHAL KernelSpec(")
+    print(f" IMAIHAL op = {op}")
+    print(f" IMAIHAL is_reduction = {is_reduction}")    
+    print(f" IMAIHAL numel = {[d.numel for d in dims]}")
+    print(f" IMAIHAL args = {args}")        
+    print(f" IMAIHAL scales = {scales}")            
+    print(f" IMAIhAL op_info = {op_info}")            
     return KernelSpec(op, is_reduction, [d.numel for d in dims], args, scales, op_info)
 
 
@@ -335,6 +343,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
 
     def load(self, name: str, index: sympy.Expr):
         """Codegen a load from an InputBuffer"""
+        print("IMAIHAL load")
         _ = self.args.input(name)
         buf = V.graph.get_buffer(name)
         layout = buf.get_layout()
@@ -350,6 +359,11 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         value: RValue,
         mode: StoreMode = None,
     ) -> None:
+        print(f"IMAIHAL store")
+        print(f" IMAIHAL      : name = {name}")
+        print(f" IMAIHAL      : index = {index}")
+        print(f" IMAIHAL      : value = {value}")        
+        print(f" IMAIHAL      : mode = {mode}")                
         _ = self.args.output(name)
         buf = V.graph.get_buffer(name)
         layout = buf.get_layout()
@@ -357,6 +371,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             raise Unsupported(f"{name} does not have FixedTiledLayout")
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
         dst = TensorAccess(name, index, layout)
+        print(f" IMAIHAL      : dst = {dst}")
 
         actuals = self.args.python_argdefs()[1]
         op_info = {}
@@ -406,11 +421,16 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 create_kernel_spec(value.op, False, di, args, scales, op_info)
             )
         elif isinstance(value, TensorAccess):
+            print(" IMAIHAL value is TensorAccess.")
             # Reshapes, transposes, and other dataops
             input_stride = list(self.get_strides(value.index).values())[0]
             output_stride = list(self.get_strides(dst.index).values())[0]
             in_di = self.analyze_index_expr(value.index)
             out_di = self.analyze_index_expr(dst.index)
+            print(f" IMAIHAL input_stride = {input_stride}")
+            print(f" IMAIHAL output_stride = {output_stride}")
+            print(f" IMAIHAL in_di = {in_di} (iteration space for input)")
+            print(f" IMAIHAL out_di = {out_di} (iteration space for output)")
             args = [
                 create_tensor_arg(True, actuals.index(value.name), value.layout),
                 create_tensor_arg(False, actuals.index(dst.name), dst.layout),
@@ -420,6 +440,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 self.analyze_tensor_access(out_di, index),
             ]
             if isinstance(args[0], TensorArg) and isinstance(args[1], TensorArg):
+                print(f" IMAIHAL args = {args[0]}, {args[1]}")
                 # Determine data op based on tensor arg and scales
                 if (
                     Counter(args[0].host_size) == Counter(args[1].host_size)
@@ -434,7 +455,8 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 elif input_stride == 64 and output_stride == 64:
                     op = "swap"
                 elif input_stride == 64 and output_stride == 1:
-                    op = "slice"
+                    print("IMAIHAL op=slice_special")
+                    op = "slice_special"
                 elif (
                     args[1].device_layout.device_size
                     == args[0].device_layout.device_size
@@ -443,11 +465,16 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                     op = CLONE_OP
                 else:
                     # Unsupported data operation on TensorArg
-                    raise Unsupported(f"Data operation {args[0]})=>{args[1]}")
+                    print("warning:: force 'op' to slice.")
+                    op = "slice"
+                    # print("warning:: force 'op' to clone.")
+                    # op = CLONE_OP
+                    # raise Unsupported(f"Data operation {args[0]})=>{args[1]}")
             else:
                 # Unsupported data operation on ConstantArg
                 raise Unsupported(f"Data operation on {type(args[0])}")
-
+            print(f" IMAIHAL op_info = {op_info}")
+            print(f" IMAIHAL scales = {scales}")
             ks = create_kernel_spec(op, False, in_di, args, scales, op_info)
             if in_di != out_di:
                 ks.op_info["transposed_dims"] = [
@@ -574,18 +601,24 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         """
         Return the iteration space implied by the index expression
         """
+        print("IMAIHAL analyze_index_expr")
         strides = self.get_strides(index)
+        print(f" IMAIHAL strides = {strides}")
         ordered_strides: Sequence[tuple[sympy.Symbol, sympy.Expr]] = sorted(
             strides.items(), key=lambda item: item[1], reverse=True
         )
+        print(f" IMAIHAL ordered_strides = {ordered_strides}")
         result = []
         var_ranges = self.var_ranges()
+        print(f" IMAIHAL var_ranges = {var_ranges}")
         for v, _ in ordered_strides:
+            print(f" IMAIHAL DimensionInfo(v, int(var_ranges[v]) = {DimensionInfo(v, int(var_ranges[v]))}")
             result.append(DimensionInfo(v, int(var_ranges[v])))
         return result
 
     def codegen_kernel(self):
         """Codegen the body of this kernel by pretty printing its KernelSpec"""
+        print("IMAIHAL codegen_kernel()")
         buf = IndentedBuffer()
         if len(self.kernel_specs) != 1:
             raise Unsupported(f"found {len(self.kernel_specs)} KernelSpecs")

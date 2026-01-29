@@ -43,6 +43,7 @@ class SpyreAsyncCompile:
         pass
 
     def sdsc(self, kernel_name: str, ks: Union[KernelSpec | UnimplementedOp]):
+        print("IMAIHAL sdsc():")
         if isinstance(ks, UnimplementedOp):
             print(f"WARNING: Compiling unimplemented {ks.op} to runtime exception")
             return SpyreUnimplementedRunner(kernel_name, ks.op)
@@ -54,20 +55,24 @@ class SpyreAsyncCompile:
             if isinstance(ts, ConstantArg):
                 raise RuntimeError("TOOO: implement SDSC generation for constants")
             elif ts.is_input:
+                print(f"　IMAIHAL input ts.host_size = {ts.host_size}")
                 inputs.append(
                     {
                         "name": _argument_names[index],
                         "scale": ks.scales[index],
                         "ddtype": ts.device_layout.device_dtype,
+                        "host_size": ts.host_size,
                     }
                 )
                 arg_mapping.append(ts.arg_index)
             else:
+                print(f"　IMAIHAL other ts.host_size = {ts.host_size}")
                 outputs.append(
                     {
                         "name": _argument_names[index],
                         "scale": ks.scales[index],
                         "ddtype": ts.device_layout.device_dtype,
+                        "host_size": ts.host_size,
                     }
                 )
                 arg_mapping.append(ts.arg_index)

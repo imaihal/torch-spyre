@@ -488,6 +488,159 @@ def generate_transpose_3d_stick(
 
 
 def generate_slice(pointers, *, op, dimensions, inputs, outputs, **kwargs):
+    print("IMAIHAL generate_slice()")
+    print(f" IMAIHAL pointers[inputs[0][\"name\"]]={pointers[inputs[0]["name"]]}")
+    print(f" IMAIHAL op = {op}")
+    print(f" IMAIHAL dimensions = {dimensions}")
+    print(f" IMAIHAL inputs = {inputs}")
+    print(f" IMAIHAL inputs[0][\"host_size\"] = {inputs[0]["host_size"]}")
+    print(f" IMAIHAL outputs = {outputs}")
+    print(f" IMAIHAL outputs[0][\"host_size\"] = {outputs[0]["host_size"]}")
+    input_shape = inputs[0]["host_size"]
+    output_shape = outputs[0]["host_size"]
+    print(f" IMAIHAL kwargs = {kwargs}")        
+    return {
+        "reshape": {
+            "numCoresUsed_": 1,
+            "dscs_": [],
+            "coreIdToDscSchedule": {"0": [[0, -1, 0, 0]]},
+            "datadscs_": [
+                {
+                    "reshape": {
+                        "coreIdsUsed_": [0],
+                        "dimPool_": ["mb", "out"],
+                        "primaryDs_": [{"name_": "pds0", "dimNames": ["mb", "out"]}],
+                        "labeledDs_": [
+                            {
+                                "pdsName_": "pds0",
+                                "wordLength": 2,
+                                "dataformat": "SEN169_FP16",
+                                "layoutDimOrder_": ["mb", "out"],
+                                "stickDimOrder_": ["out"],
+                                "dimToLayoutSize_": {
+                                    "mb": input_shape[0],
+                                    "out": input_shape[-1] # 128, #dimensions[-1],
+                                },
+                                "dimToStickSize_": {"out": 64},
+                                "validGap_": {
+                                    "mb": [[input_shape[0], 0]], # [[dimensions[0], 0]],
+                                    "out": [[64, 64]],
+                                },
+                                "PieceInfo": [
+                                    {
+                                        "key_": f"p{i}",
+                                        "dimToSize_": {"mb": input_shape[0], "out": output_shape[-1]},
+                                        "validGap_": {
+                                            "mb": [[input_shape[0], 0]],
+                                            "out": [[64, 0]],
+                                        },
+                                        "PlacementInfo": [
+                                            {
+                                                "type": "hbm",
+                                                "memId": [-1],
+                                                "startAddr": [
+                                                    pointers[inputs[0]["name"]] // 128
+                                                ],
+                                            },
+                                            {
+                                                "type": "lx",
+                                                "memId": [0],
+                                                "startAddr": [16384],
+                                            },
+                                        ],
+                                    }
+                                    for i in range(dimensions[0] // 64)
+                                ],
+                                "hbmStartAddress_": pointers[inputs[0]["name"]] // 128,
+                            },
+                            {
+                                "pdsName_": "pds0",
+                                "wordLength": 2,
+                                "dataformat": "SEN169_FP16",
+                                "layoutDimOrder_": ["mb", "out"],
+                                "stickDimOrder_": ["out"],
+                                "dimToLayoutSize_": {
+                                    "mb": output_shape[0],
+                                    "out": output_shape[-1], #64, #dimensions[-1],
+                                },
+                                "dimToStickSize_": {"out": 64},
+                                "validGap_": {
+                                    "mb": [[output_shape[0], 0]],
+                                    "out": [[64, 0]],
+                                },
+                                "PieceInfo": [
+                                    {
+                                        "key_": f"p{i}",
+                                        "dimToSize_": {"mb": output_shape[0], "out": 64},
+                                        "validGap_": {
+                                            "mb": [[output_shape[0], 0]],
+                                            "out": [[64, 0]],
+                                        },
+                                        "PlacementInfo": [
+                                            {
+                                                "type": "hbm",
+                                                "memId": [-1],
+                                                "startAddr": [
+                                                    pointers[outputs[0]["name"]] // 128
+                                                ],
+                                            },
+                                            {
+                                                "type": "lx",
+                                                "memId": [0],
+                                                "startAddr": [0],
+                                            },
+                                        ],
+                                    }
+                                    for i in range(dimensions[0] // 64)
+                                ],
+                                "hbmStartAddress_": pointers[outputs[0]["name"]] // 128,
+                            },
+                        ],
+                        "op": {
+                            "name": "STCDPOpHBM",
+                            "gtrIdsUsed": [],
+                            "coreIDtoANInfo": {
+                                "0": {
+                                    "loopCount": {
+                                        "out": dimensions[0] // 64,
+                                        "mb": 1,
+                                    },
+                                    "loopCountL3SU": {},
+                                    "addr_info_": {
+                                        "l3lu": {
+                                            "type_": "stride",
+                                            "offset_": {
+                                                "mb": 1,
+                                                "out": 64,
+                                            },
+                                        },
+                                        "l3su": {
+                                            "type_": "stride",
+                                            "offset_": {
+                                                "mb": 1,
+                                                "out": 64,
+                                            },
+                                        },
+                                    },
+                                    "inpPieceOrder": [
+                                        f"p{i}" for i in range(dimensions[0] // 64)
+                                    ],
+                                    "outPieceOrder": [
+                                        f"p{i}" for i in range(dimensions[0] // 64)
+                                    ],
+                                }
+                            },
+                            "numClToUse": 1,
+                            "cl0ToLxOffsetLU": 0,
+                            "cl0ToLxOffsetSU": 0,
+                        },
+                    }
+                }
+            ],
+        }
+    }
+
+def generate_slice_special(pointers, *, op, dimensions, inputs, outputs, **kwargs):
     return {
         "reshape": {
             "numCoresUsed_": 1,

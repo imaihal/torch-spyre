@@ -59,6 +59,15 @@ def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwa
             outputs=outputs,
             **kwargs,
         )
+    if op == "slice_special":
+        return generate_slice_special(
+            pointers,
+            op=op,
+            dimensions=dimensions,
+            inputs=inputs,
+            outputs=outputs,
+            **kwargs,
+        )        
     if op == "slice":
         return generate_slice(
             pointers,

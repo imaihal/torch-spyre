@@ -665,7 +665,7 @@ at::Tensor spyre_reinterpret_tensor(const at::Tensor& self,
                                     c10::IntArrayRef size,
                                     c10::IntArrayRef stride,
                                     int64_t offset_increment) {
-  DEBUGINFO("Size:", size, ", Stride: ", stride, " on device ", self.device());
+  DEBUGINFO("Size:", size, ", Stride: ", stride, ", offset_increment: ", offset_increment, " on device ", self.device());
   auto device_layout =
       SpyreTensorLayout(size.vec(), c10::typeMetaToScalarType(self.dtype()));
   auto self_ = at::detail::make_tensor_base<SpyreTensorImpl>(
