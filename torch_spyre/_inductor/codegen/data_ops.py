@@ -498,7 +498,31 @@ def generate_slice(pointers, *, op, dimensions, inputs, outputs, **kwargs):
     print(f" IMAIHAL outputs[0][\"host_size\"] = {outputs[0]["host_size"]}")
     input_shape = inputs[0]["host_size"]
     output_shape = outputs[0]["host_size"]
-    print(f" IMAIHAL kwargs = {kwargs}")        
+    print(f" IMAIHAL kwargs = {kwargs}")      
+    offsets = [0, kwargs["op_info"]["offset"]] # [0, 128]
+    print(f"IMAIHAL offsets = {offsets}")
+    if offsets[-1] == 0:
+        valid_gaps = {"mb": [[output_shape[0], input_shape[0] - output_shape[0]]],
+                       "out":  [[output_shape[-1], input_shape[-1] - output_shape[-1]]]} 
+    else:    
+        valid_gaps = {"mb": [[output_shape[0], input_shape[0] - output_shape[0] - offsets[0]]],
+                     "out":  [[0, offsets[-1]], [output_shape[-1], input_shape[-1] - output_shape[-1] - offsets[-1]]]} 
+    print(valid_gaps)
+    """
+        offset =s {"mb": 64 if dimensions[0] % 64 == 0 else 1, "out": dimensions[0]}
+        loop_counts = {
+            "mb": dimensions[0] // 64 if dimensions[0] % 64 == 0 else dimensions[0],
+            "out": dimensions[-1] // 64,
+        }
+        piece_sizes = {"mb": 64 if dimensions[0] % 64 == 0 else 1, "out": 64}
+        piece_valid_gaps = {
+            "mb": [[piece_sizes["mb"], 0]],
+            "out": [[piece_sizes["out"], 0]],
+        }
+        piece_count = (
+            dimensions[0] * dimensions[-1] // (4096 if dimensions[0] % 64 == 0 else 64)
+        )     
+    """        
     return {
         "reshape": {
             "numCoresUsed_": 1,
@@ -522,35 +546,34 @@ def generate_slice(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                     "out": input_shape[-1] # 128, #dimensions[-1],
                                 },
                                 "dimToStickSize_": {"out": 64},
-                                "validGap_": {
-                                    "mb": [[input_shape[0], 0]], # [[dimensions[0], 0]],
-                                    "out": [[64, 64]],
-                                },
+                                "validGap_": valid_gaps,
                                 "PieceInfo": [
                                     {
                                         "key_": f"p{i}",
-                                        "dimToSize_": {"mb": input_shape[0], "out": output_shape[-1]},
+                                        "dimToStartCordinate" : {"mb" : offsets[0], "out" : offsets[-1]},
+                                        "dimToSize_": {"mb": output_shape[0], "out": output_shape[-1]},
                                         "validGap_": {
-                                            "mb": [[input_shape[0], 0]],
-                                            "out": [[64, 0]],
+                                            "mb": [[output_shape[0], 0]],
+                                            "out": [[output_shape[-1], 0]],
                                         },
                                         "PlacementInfo": [
                                             {
                                                 "type": "hbm",
                                                 "memId": [-1],
                                                 "startAddr": [
-                                                    pointers[inputs[0]["name"]] // 128
+                                                    pointers[inputs[0]["name"]] // 128 + offsets[-1]
                                                 ],
                                             },
                                             {
                                                 "type": "lx",
                                                 "memId": [0],
-                                                "startAddr": [16384],
+                                                "startAddr": [0],
                                             },
                                         ],
                                     }
                                     for i in range(dimensions[0] // 64)
                                 ],
+                                "hbmSize_" : 128,
                                 "hbmStartAddress_": pointers[inputs[0]["name"]] // 128,
                             },
                             {
@@ -566,15 +589,16 @@ def generate_slice(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                 "dimToStickSize_": {"out": 64},
                                 "validGap_": {
                                     "mb": [[output_shape[0], 0]],
-                                    "out": [[64, 0]],
+                                    "out": [[output_shape[-1], 0]],
                                 },
                                 "PieceInfo": [
                                     {
                                         "key_": f"p{i}",
-                                        "dimToSize_": {"mb": output_shape[0], "out": 64},
+                                        "dimToStartCordinate" : {"mb" : 0, "out" : 0},
+                                        "dimToSize_": {"mb": output_shape[0], "out": output_shape[-1]},
                                         "validGap_": {
                                             "mb": [[output_shape[0], 0]],
-                                            "out": [[64, 0]],
+                                            "out": [[output_shape[-1], 0]],
                                         },
                                         "PlacementInfo": [
                                             {
@@ -593,6 +617,7 @@ def generate_slice(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                     }
                                     for i in range(dimensions[0] // 64)
                                 ],
+                                "hbmSize_" : 128,
                                 "hbmStartAddress_": pointers[outputs[0]["name"]] // 128,
                             },
                         ],

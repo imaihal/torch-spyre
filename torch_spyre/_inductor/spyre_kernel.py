@@ -363,6 +363,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         print(f" IMAIHAL      : name = {name}")
         print(f" IMAIHAL      : index = {index}")
         print(f" IMAIHAL      : value = {value}")        
+
         print(f" IMAIHAL      : mode = {mode}")                
         _ = self.args.output(name)
         buf = V.graph.get_buffer(name)
@@ -371,6 +372,8 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             raise Unsupported(f"{name} does not have FixedTiledLayout")
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
         dst = TensorAccess(name, index, layout)
+
+
         print(f" IMAIHAL      : dst = {dst}")
 
         actuals = self.args.python_argdefs()[1]
@@ -467,6 +470,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                     # Unsupported data operation on TensorArg
                     print("warning:: force 'op' to slice.")
                     op = "slice"
+
                     # print("warning:: force 'op' to clone.")
                     # op = CLONE_OP
                     # raise Unsupported(f"Data operation {args[0]})=>{args[1]}")
@@ -476,6 +480,14 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             print(f" IMAIHAL op_info = {op_info}")
             print(f" IMAIHAL scales = {scales}")
             ks = create_kernel_spec(op, False, in_di, args, scales, op_info)
+            if op == "slice":
+                print(f" IMAIHAL      : value.index = {value.index}")        
+                print(f" IMAIHAL      : value.index.as_independent(*value.index.free_symbols) = {value.index.as_independent(*value.index.free_symbols)}")        
+                offset_in, _ = value.index.as_independent(*value.index.free_symbols)
+                print(offset_in)
+                # offset_dst, _ = dst.index.as_independent(*dst.index.free_symbols)
+                # print(offset_dst)
+                ks.op_info["offset"] = offset_in
             if in_di != out_di:
                 ks.op_info["transposed_dims"] = [
                     d for d in range(len(in_di)) if in_di[d].var != out_di[d].var
