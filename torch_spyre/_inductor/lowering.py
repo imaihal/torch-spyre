@@ -316,3 +316,30 @@ def lower_clamp(x, min=None, max=None):
     )
     pw.realize()
     return pw
+
+
+lowering.register_op_dtype_propagation_rules(
+    "slice_copy", lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, None
+)
+
+
+@register_spyre_lowering(torch.ops.spyre.slice_copy)
+# def lower_slice_copy(input, output, dim=0, start=0, end=2**63, step=1):
+def lower_slice_copy(input, dim=0, start=0, end=2**63, step=1):
+    fn = lowering.ops_wrapper(torch.ops.spyre.slice_copy.__name__)
+
+    def inner_fn(index):
+        return fn(input.make_loader()(index), dim, start, end, step)
+
+    output_size = list(input.get_size())
+    output_size[dim] = end - start
+    pw = Pointwise.create(
+        device=input.get_device(),
+        dtype=input.get_dtype(),
+        inner_fn=inner_fn,
+        ranges=output_size,
+        origin_node=input.get_origin_node(),
+        traceback=input.get_traceback(),
+    )
+    pw.realize()
+    return pw
