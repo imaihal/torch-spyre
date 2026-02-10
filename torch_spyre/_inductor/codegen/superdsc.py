@@ -21,7 +21,8 @@ from torch_spyre._inductor.constants import (
 from torch_spyre._inductor import Unsupported
 from .compute_ops import generate_sfp_op, generate_matmul, generate_bmm
 from .data_ops import (
-    generate_slice,
+    generate_copy,
+    generate_slice_special,
     generate_transpose,
     generate_transpose_3d_stick,
     generate_transpose_4d_stick,
@@ -59,8 +60,17 @@ def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwa
             outputs=outputs,
             **kwargs,
         )
-    if op == "slice":
-        return generate_slice(
+    if op == "slice_special":
+        return generate_slice_special(
+            pointers,
+            op=op,
+            dimensions=dimensions,
+            inputs=inputs,
+            outputs=outputs,
+            **kwargs,
+        )
+    if op == "slice_copy":
+        return generate_copy(
             pointers,
             op=op,
             dimensions=dimensions,
