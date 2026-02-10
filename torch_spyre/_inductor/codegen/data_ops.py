@@ -501,84 +501,112 @@ def get_valid_gaps_slice(dim, sliced_dim, start, end, input_shape, output_shape)
 
 
 def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
-    print("IMAIHAL generate_slice()")
-    print(f' IMAIHAL pointers[inputs[0]["name"]]={pointers[inputs[0]["name"]]}')
-    print(f" IMAIHAL op = {op}")
-    print(f" IMAIHAL dimensions = {dimensions}")
-    print(f" IMAIHAL inputs = {inputs}")
-    print(f' IMAIHAL inputs[0]["host_size"] = {inputs[0]["host_size"]}')
-    print(f" IMAIHAL outputs = {outputs}")
-    print(f' IMAIHAL outputs[0]["host_size"] = {outputs[0]["host_size"]}')
-    print(f" IMAIHAL kwargs = {kwargs}")
+    print("IMAIHAL generate_copy()")
+    ndims = len(dimensions)
+    assert ndims == 2, f"dosn't support ndim={ndim}"
+    input_dtype = inputs[0]["device_layout"].device_dtype
+    word_length = num_bytes(input_dtype)
+    data_format = input_dtype.name
+    elems_per_stick = input_dtype.elems_per_stick()
+
     input_shape = inputs[0]["host_size"]
     output_shape = outputs[0]["host_size"]
     items = kwargs["op_info"]["constants"]
-    print(f' IMAIHAL items["dim"] = {items["dim"]}')
-    print(f' IMAIHAL items["start"] = {items["start"]}')
-    print(f' IMAIHAL items["end"] = {items["end"]}')
-    offsets = [0, items["start"]]  # [0, 128]
-    print(f"IMAIHAL offsets = {offsets}")
-    if offsets[-1] == 0:
-        valid_gaps = {
+    offsets_in = [0, items["start"]]
+
+    # ndims == 2:
+    layout = ["mb", "out"]
+    dim_map_in = {"mb": input_shape[0], "out": input_shape[-1]}
+    dim_map_out = {"mb": output_shape[0], "out": output_shape[-1]}
+    offsets = {
+        "mb": elems_per_stick if dimensions[0] % elems_per_stick == 0 else 1,  # 1
+        "out": dimensions[-1],
+    }
+    loop_counts = {
+        "mb": dimensions[0] // elems_per_stick
+        if dimensions[0] % elems_per_stick == 0
+        else dimensions[0],
+        "out": dimensions[-1] // elems_per_stick,
+    }
+    piece_sizes = {
+        "mb": elems_per_stick if dimensions[0] % elems_per_stick == 0 else 1,
+        "out": elems_per_stick,
+    }
+    piece_valid_gaps = {
+        "mb": [[piece_sizes["mb"], 0]],
+        "out": [[piece_sizes["out"], 0]],
+    }
+
+    if offsets_in[-1] == 0:
+        valid_gaps_in = {
             "mb": [[output_shape[0], input_shape[0] - output_shape[0]]],
             "out": [[output_shape[-1], input_shape[-1] - output_shape[-1]]],
         }
     else:
-        valid_gaps = {
-            "mb": [[output_shape[0], input_shape[0] - output_shape[0] - offsets[0]]],
+        valid_gaps_in = {
+            "mb": [[output_shape[0], input_shape[0] - output_shape[0] - offsets_in[0]]],
             "out": [
-                [0, offsets[-1]],
-                [output_shape[-1], input_shape[-1] - output_shape[-1] - offsets[-1]],
+                [0, offsets_in[-1]],
+                [output_shape[-1], input_shape[-1] - output_shape[-1] - offsets_in[-1]],
             ],
         }
-    print(valid_gaps)
+
+    valid_gaps_out = {
+        "mb": [[output_shape[0], 0]],
+        "out": [[output_shape[-1], 0]],
+    }
+
+    piece_count = (
+        dimensions[0]
+        * dimensions[-1]
+        // (
+            elems_per_stick * elems_per_stick
+            if dimensions[0] % elems_per_stick == 0
+            else elems_per_stick
+        )
+    )
 
     return {
-        "reshape": {
+        "copy": {
             "numCoresUsed_": 1,
             "dscs_": [],
             "coreIdToDscSchedule": {"0": [[0, -1, 0, 0]]},
             "datadscs_": [
                 {
-                    "reshape": {
+                    "copy": {
                         "coreIdsUsed_": [0],
-                        "dimPool_": ["mb", "out"],
-                        "primaryDs_": [{"name_": "pds0", "dimNames": ["mb", "out"]}],
+                        "dimPool_": layout,
+                        "primaryDs_": [{"name_": "pds0", "dimNames": layout}],
                         "labeledDs_": [
                             {
                                 "pdsName_": "pds0",
-                                "wordLength": 2,
-                                "dataformat": "SEN169_FP16",
-                                "layoutDimOrder_": ["mb", "out"],
+                                "wordLength": word_length,
+                                "dataformat": data_format,
+                                "layoutDimOrder_": layout,
                                 "stickDimOrder_": ["out"],
-                                "dimToLayoutSize_": {
-                                    "mb": input_shape[0],
-                                    "out": input_shape[-1],
-                                },
-                                "dimToStickSize_": {"out": 64},
-                                "validGap_": valid_gaps,
+                                "dimToLayoutSize_": dim_map_in,
+                                # "dimToLayoutSize_": {
+                                #     "mb": input_shape[0],
+                                #    "out": input_shape[-1],
+                                # },
+                                "dimToStickSize_": {"out": elems_per_stick},
+                                "validGap_": valid_gaps_in,
                                 "PieceInfo": [
                                     {
                                         "key_": f"p{i}",
                                         "dimToStartCordinate": {
-                                            "mb": offsets[0],
-                                            "out": offsets[-1],
+                                            "mb": offsets_in[0],
+                                            "out": offsets_in[-1],
                                         },
-                                        "dimToSize_": {
-                                            "mb": output_shape[0],
-                                            "out": output_shape[-1],
-                                        },
-                                        "validGap_": {
-                                            "mb": [[output_shape[0], 0]],
-                                            "out": [[output_shape[-1], 0]],
-                                        },
+                                        "dimToSize_": piece_sizes,
+                                        "validGap_": piece_valid_gaps,
                                         "PlacementInfo": [
                                             {
                                                 "type": "hbm",
                                                 "memId": [-1],
                                                 "startAddr": [
                                                     pointers[inputs[0]["name"]] // 128
-                                                    + offsets[-1]
+                                                    + offsets_in[-1]
                                                 ],
                                             },
                                             {
@@ -588,38 +616,34 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                             },
                                         ],
                                     }
-                                    for i in range(dimensions[0] // 64)
+                                    for i in range(piece_count)
                                 ],
                                 "hbmSize_": 128,
                                 "hbmStartAddress_": pointers[inputs[0]["name"]] // 128,
                             },
                             {
                                 "pdsName_": "pds0",
-                                "wordLength": 2,
-                                "dataformat": "SEN169_FP16",
-                                "layoutDimOrder_": ["mb", "out"],
+                                "wordLength": word_length,
+                                "dataformat": data_format,
+                                "layoutDimOrder_": layout,
                                 "stickDimOrder_": ["out"],
-                                "dimToLayoutSize_": {
-                                    "mb": output_shape[0],
-                                    "out": output_shape[-1],
-                                },
-                                "dimToStickSize_": {"out": 64},
-                                "validGap_": {
-                                    "mb": [[output_shape[0], 0]],
-                                    "out": [[output_shape[-1], 0]],
-                                },
+                                "dimToLayoutSize_": dim_map_out,
+                                # "dimToLayoutSize_": {
+                                #     "mb": output_shape[0],
+                                #     "out": output_shape[-1],
+                                # },
+                                "dimToStickSize_": {"out": elems_per_stick},
+                                "validGap_": valid_gaps_out,
+                                # "validGap_": {
+                                #     "mb": [[output_shape[0], 0]],
+                                #     "out": [[output_shape[-1], 0]],
+                                # },
                                 "PieceInfo": [
                                     {
                                         "key_": f"p{i}",
                                         "dimToStartCordinate": {"mb": 0, "out": 0},
-                                        "dimToSize_": {
-                                            "mb": output_shape[0],
-                                            "out": output_shape[-1],
-                                        },
-                                        "validGap_": {
-                                            "mb": [[output_shape[0], 0]],
-                                            "out": [[output_shape[-1], 0]],
-                                        },
+                                        "dimToSize_": piece_sizes,
+                                        "validGap_": piece_valid_gaps,
                                         "PlacementInfo": [
                                             {
                                                 "type": "hbm",
@@ -635,7 +659,7 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                             },
                                         ],
                                     }
-                                    for i in range(dimensions[0] // 64)
+                                    for i in range(piece_count)
                                 ],
                                 "hbmSize_": 128,
                                 "hbmStartAddress_": pointers[outputs[0]["name"]] // 128,
@@ -646,32 +670,31 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                             "gtrIdsUsed": [],
                             "coreIDtoANInfo": {
                                 "0": {
-                                    "loopCount": {
-                                        "out": dimensions[0] // 64,
-                                        "mb": 1,
-                                    },
+                                    "loopCount": loop_counts,
                                     "loopCountL3SU": {},
                                     "addr_info_": {
-                                        "l3lu": {
-                                            "type_": "stride",
-                                            "offset_": {
-                                                "mb": 1,
-                                                "out": 64,
-                                            },
-                                        },
-                                        "l3su": {
-                                            "type_": "stride",
-                                            "offset_": {
-                                                "mb": 1,
-                                                "out": 64,
-                                            },
-                                        },
+                                        "l3lu": {"type_": "stride", "offset_": offsets},
+                                        # "l3lu": {
+                                        #    "type_": "stride",
+                                        # "offset_": {
+                                        #     "mb": 1,
+                                        #     "out": 64,
+                                        # },
+                                        # },
+                                        "l3su": {"type_": "stride", "offset_": offsets},
+                                        # "l3su": {
+                                        #     "type_": "stride",
+                                        #     "offset_": {
+                                        #         "mb": 1,
+                                        #         "out": 64,
+                                        #    },
+                                        # },
                                     },
                                     "inpPieceOrder": [
-                                        f"p{i}" for i in range(dimensions[0] // 64)
+                                        f"p{i}" for i in range(piece_count)
                                     ],
                                     "outPieceOrder": [
-                                        f"p{i}" for i in range(dimensions[0] // 64)
+                                        f"p{i}" for i in range(piece_count)
                                     ],
                                 }
                             },
