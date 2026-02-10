@@ -489,19 +489,7 @@ def generate_transpose_3d_stick(
     }
 
 
-def get_valid_gaps_slice(dim, sliced_dim, start, end, input_shape, output_shape):
-    if dim == sliced_dim and start != 0:
-        valid_gaps = [
-            [0, start],
-            [output_shape[dim], input_shape[dim] - output_shape[dim] - start],
-        ]
-    else:
-        valid_gaps = [[output_shape[dim], input_shape[dim] - output_shape[dim]]]
-    return valid_gaps
-
-
 def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
-    print("IMAIHAL generate_copy()")
     ndims = len(dimensions)
     assert ndims == 2, f"dosn't support ndim={ndim}"
     input_dtype = inputs[0]["device_layout"].device_dtype
