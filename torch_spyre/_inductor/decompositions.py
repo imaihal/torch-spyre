@@ -134,6 +134,36 @@ def spyre_clamp(
 
 torch.clamp = spyre_clamp
 
+orig_chunk = torch.chunk
+
+
+def spyre_chunk_copy(
+    input: torch.Tensor,
+    chunks: int,
+    dim: Optional[int] = 0,
+) -> torch.Tensor:
+    # In the first dimension (dim == 0), the default decomposition into
+    # aten.split.Tensor works correctly.
+    if input.device.type == "spyre" and dim != 0:
+        out = []
+        chunk_size = input.size()[dim] // chunks
+        start = 0
+        step = 1
+        output_size = list(input.size())
+        # In the original decomposition, aten.split.Tensor is used instead of
+        # aten.slice.Tensor. Since aten.split.Tensor requires support for multiple
+        # outputs, we currently use slicing for each output.
+        for _ in range(chunks):
+            end = start + chunk_size
+            out.append(torch.ops.spyre.slice_copy(input, dim, start, end, step))
+            start = end
+        return tuple(out)
+    else:
+        return orig_chunk(input, chunks, dim)
+
+
+torch.chunk = spyre_chunk_copy
+
 
 @register_decomposition([torch.ops.aten.gt.Tensor, torch.ops.aten.gt.Tensor_out])
 def gt_decomp(
