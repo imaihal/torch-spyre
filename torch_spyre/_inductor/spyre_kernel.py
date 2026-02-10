@@ -177,6 +177,18 @@ class SpyreOpFuncs:
         return PointwiseOp("sigmoid", [x])
 
     @staticmethod
+    def slice_copy(x, dim, start, end, step):
+        op_info = {
+            "constants": {
+                "dim": dim,
+                "start": start,
+                "end": end,
+                "step": step,
+            }
+        }
+        return PointwiseOp("slice_copy", [x], op_info)
+
+    @staticmethod
     def softplus(x, beta, threshold):
         op_info = {
             "constants": {
@@ -441,7 +453,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 elif input_stride == 64 and output_stride == 64:
                     op = "swap"
                 elif input_stride == 64 and output_stride == 1:
-                    op = "slice"
+                    op = "slice_special"
                 elif (
                     args[1].device_layout.device_size
                     == args[0].device_layout.device_size
