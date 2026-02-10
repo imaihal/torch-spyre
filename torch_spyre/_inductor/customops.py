@@ -194,3 +194,28 @@ def _(
     dtype: Optional[torch.dtype] = None,
 ):
     return torch.empty(size, dtype=dtype, device="spyre")
+
+
+@torch.library.custom_op("spyre::slice_copy", mutates_args=(), device_types="spyre")
+def slice_copy(
+    # Tensor(a) self, int dim=0, SymInt? start=None, SymInt? end=None, SymInt step=1
+    input: torch.Tensor,
+    dim: int = 0,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
+    step: int = 1,
+) -> torch.Tensor:
+    pass
+
+
+@slice_copy.register_fake
+def _(
+    input: torch.Tensor,
+    dim: int = 0,
+    start: Optional[int] = None,
+    end: Optional[int] = None,
+    step: int = 1,
+):
+    output_size = list(input.size())
+    output_size[dim] = end - start
+    return input.new_empty(output_size, dtype=input.dtype)
