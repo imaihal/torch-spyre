@@ -21,8 +21,8 @@ from torch_spyre._inductor.constants import (
 from torch_spyre._inductor import Unsupported
 from .compute_ops import generate_sfp_op, generate_matmul, generate_bmm
 from .data_ops import (
+    generate_slice,
     generate_copy,
-    generate_slice_special,
     generate_transpose,
     generate_transpose_3d_stick,
     generate_transpose_4d_stick,
@@ -31,8 +31,6 @@ from .data_ops import (
 
 
 def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwargs):
-    if len(dimensions) > 3 and (op != BATCH_MATMUL_OP and op != TRANSPOSE_OP):
-        raise Unsupported(f"{op} on {len(dimensions)}-D tensor")
     if op == MATMUL_REDUCTION_OP:
         return generate_matmul(
             pointers,
@@ -60,8 +58,8 @@ def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwa
             outputs=outputs,
             **kwargs,
         )
-    if op == "slice_special":
-        return generate_slice_special(
+    if op == "slice":
+        return generate_slice(
             pointers,
             op=op,
             dimensions=dimensions,
@@ -129,8 +127,7 @@ def generate_sdsc(pointers, *, op, dimensions, inputs, outputs, reduction, **kwa
         transposed_dims = [
             dim % len(dimensions) for dim in kwargs["op_info"]["transposed_dims"]
         ]
-        # TODO: add support for other stick transpose variants (1-3 and 2-3)
-        is_supported = (0 in transposed_dims) and 3 in transposed_dims
+        is_supported = 3 in transposed_dims
         if is_supported:
             return generate_transpose_4d_stick(
                 pointers,
