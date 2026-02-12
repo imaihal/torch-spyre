@@ -93,12 +93,7 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
                     output.device, output.dtype, output.size, output.stride, stl
                 )
             case spyreop.slice_copy.default:
-                stl = SpyreTensorLayout(
-                    output.size,
-                    output.dtype,
-                    x.layout.device_layout.host_dim_order(),
-                    x.layout.device_layout.format,
-                )
+                stl = SpyreTensorLayout(output.size, output.dtype)
                 return FixedTiledLayout(
                     output.device, output.dtype, output.size, output.stride, stl
                 )
