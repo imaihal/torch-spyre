@@ -149,7 +149,6 @@ def spyre_chunk_copy(
         chunk_size = input.size()[dim] // chunks
         start = 0
         step = 1
-        output_size = list(input.size())
         # In the original decomposition, aten.split.Tensor is used instead of
         # aten.slice.Tensor. Since aten.split.Tensor requires support for multiple
         # outputs, we currently use slicing for each output.

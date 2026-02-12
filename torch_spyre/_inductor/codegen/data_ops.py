@@ -491,7 +491,7 @@ def generate_transpose_3d_stick(
 
 def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
     ndims = len(dimensions)
-    assert ndims == 2, f"dosn't support ndim={ndim}"
+    assert ndims == 2, f"dosn't support ndim={ndims}"
     input_dtype = inputs[0]["device_layout"].device_dtype
     word_length = num_bytes(input_dtype)
     data_format = input_dtype.name
