@@ -508,7 +508,7 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
     dim_map_out = {"mb": output_shape[0], "out": output_shape[-1]}
     offsets = {
         "mb": elems_per_stick if dimensions[0] % elems_per_stick == 0 else 1,  # 1
-        "out": dimensions[-1],
+        "out": dimensions[0],
     }
     loop_counts = {
         "mb": dimensions[0] // elems_per_stick
@@ -524,7 +524,6 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
         "mb": [[piece_sizes["mb"], 0]],
         "out": [[piece_sizes["out"], 0]],
     }
-
     if offsets_in[-1] == 0:
         valid_gaps_in = {
             "mb": [[output_shape[0], input_shape[0] - output_shape[0]]],
@@ -573,19 +572,11 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                 "layoutDimOrder_": layout,
                                 "stickDimOrder_": ["out"],
                                 "dimToLayoutSize_": dim_map_in,
-                                # "dimToLayoutSize_": {
-                                #     "mb": input_shape[0],
-                                #    "out": input_shape[-1],
-                                # },
                                 "dimToStickSize_": {"out": elems_per_stick},
                                 "validGap_": valid_gaps_in,
                                 "PieceInfo": [
                                     {
                                         "key_": f"p{i}",
-                                        "dimToStartCordinate": {
-                                            "mb": offsets_in[0],
-                                            "out": offsets_in[-1],
-                                        },
                                         "dimToSize_": piece_sizes,
                                         "validGap_": piece_valid_gaps,
                                         "PlacementInfo": [
@@ -594,7 +585,6 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                                 "memId": [-1],
                                                 "startAddr": [
                                                     pointers[inputs[0]["name"]] // 128
-                                                    + offsets_in[-1]
                                                 ],
                                             },
                                             {
@@ -616,16 +606,8 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                 "layoutDimOrder_": layout,
                                 "stickDimOrder_": ["out"],
                                 "dimToLayoutSize_": dim_map_out,
-                                # "dimToLayoutSize_": {
-                                #     "mb": output_shape[0],
-                                #     "out": output_shape[-1],
-                                # },
                                 "dimToStickSize_": {"out": elems_per_stick},
                                 "validGap_": valid_gaps_out,
-                                # "validGap_": {
-                                #     "mb": [[output_shape[0], 0]],
-                                #     "out": [[output_shape[-1], 0]],
-                                # },
                                 "PieceInfo": [
                                     {
                                         "key_": f"p{i}",
@@ -643,7 +625,7 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                             {
                                                 "type": "lx",
                                                 "memId": [0],
-                                                "startAddr": [0],
+                                                "startAddr": [16384],
                                             },
                                         ],
                                     }
@@ -662,21 +644,7 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                     "loopCountL3SU": {},
                                     "addr_info_": {
                                         "l3lu": {"type_": "stride", "offset_": offsets},
-                                        # "l3lu": {
-                                        #    "type_": "stride",
-                                        # "offset_": {
-                                        #     "mb": 1,
-                                        #     "out": 64,
-                                        # },
-                                        # },
                                         "l3su": {"type_": "stride", "offset_": offsets},
-                                        # "l3su": {
-                                        #     "type_": "stride",
-                                        #     "offset_": {
-                                        #         "mb": 1,
-                                        #         "out": 64,
-                                        #    },
-                                        # },
                                     },
                                     "inpPieceOrder": [
                                         f"p{i}" for i in range(piece_count)
