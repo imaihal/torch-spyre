@@ -499,6 +499,9 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
 
     input_shape = inputs[0]["host_size"]
     output_shape = outputs[0]["host_size"]
+    assert output_shape[-1] % elems_per_stick == 0, (
+        f"supports cases where the output shape is divisible by the stick size."
+    )
     items = kwargs["op_info"]["constants"]
     offsets_in = [0, items["start"]]
 
@@ -537,6 +540,8 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                 [output_shape[-1], input_shape[-1] - output_shape[-1] - offsets_in[-1]],
             ],
         }
+
+    stick_offset = input_shape[0] * offsets_in[-1] // elems_per_stick
 
     valid_gaps_out = {
         "mb": [[output_shape[0], 0]],
@@ -585,6 +590,7 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
                                                 "memId": [-1],
                                                 "startAddr": [
                                                     pointers[inputs[0]["name"]] // 128
+                                                    + stick_offset
                                                 ],
                                             },
                                             {
