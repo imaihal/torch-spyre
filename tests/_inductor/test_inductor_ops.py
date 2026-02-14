@@ -696,6 +696,26 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d123": {cached_randn((2, 1, 1, 1), dtype=torch.float16)},
             },
         },
+        (
+            "test_chunk",
+            "test_chunk_cpu",
+        ): {
+            "param_sets": {
+                # Support 2d input and chunk with stickdim
+                "2chunks_64_512": (cached_randn((64, 512), dtype=torch.float16), 2, -1),
+                "2chunks_64_256": (cached_randn((64, 256), dtype=torch.float16), 2, -1),
+                "2chunks_64_128": (cached_randn((64, 128), dtype=torch.float16), 2, -1),
+                "2chunks_32_128": (cached_randn((32, 128), dtype=torch.float16), 2, -1),
+                "2chunks_2_128": (cached_randn((2, 128), dtype=torch.float16), 2, -1),
+                # Not supported: tensor with shape size 1 is treated as 1d tensor
+                # "2chunks_1_128": (cached_randn((1, 128), dtype=torch.float16), 2, -1),
+                # Not supported: output_shape[-1] != 64
+                # "2chunks_2_64": (cached_randn((2, 64), dtype=torch.float16), 2, -1),
+                # "2chunks_2_130": (cached_randn((2, 130), dtype=torch.float16), 2, -1),
+                "4chunks_64_256": (cached_randn((64, 256), dtype=torch.float16), 4, -1),
+                "4chunks_16_256": (cached_randn((16, 256), dtype=torch.float16), 4, -1),
+            },
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -847,6 +867,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
     def test_softmax_cpu(self, dim, x):
         compare_with_cpu(lambda x: torch.softmax(x, dim=dim), x)
+
+    def test_chunk_cpu(self, x, chunks, dim):
+        compare_with_cpu(lambda x: torch.chunk(x, chunks, dim=dim), x)
 
 
 if __name__ == "__main__":
