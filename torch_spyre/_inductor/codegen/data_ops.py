@@ -500,7 +500,7 @@ def generate_copy(pointers, *, op, dimensions, inputs, outputs, **kwargs):
     input_shape = inputs[0]["host_size"]
     output_shape = outputs[0]["host_size"]
     assert output_shape[-1] % elems_per_stick == 0, (
-        f"supports cases where the output shape is divisible by the stick size."
+        "supports cases where the output shape is divisible by the stick size."
     )
     items = kwargs["op_info"]["constants"]
     offsets_in = [0, items["start"]]
