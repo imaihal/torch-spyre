@@ -102,7 +102,7 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
                     raise Unsupported("swap on non 1-D tensor")
                 stl = SpyreTensorLayout(output.size, output.dtype, [0, -1])
 
-            case aten.clone.default, spyreop.slice_copy.default:
+            case aten.clone.default | spyreop.slice_copy.default:
                 # Puts its output into the default device layout.
                 stl = SpyreTensorLayout(output.size, output.dtype)
             case _:
