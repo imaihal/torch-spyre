@@ -217,5 +217,6 @@ def _(
     step: int = 1,
 ):
     output_size = list(input.size())
-    output_size[dim] = end - start
+    if start is not None and end is not None:
+        output_size[dim] = end - start
     return input.new_empty(output_size, dtype=input.dtype)
