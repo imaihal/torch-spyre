@@ -829,7 +829,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4chunks_64_256": (cached_randn((64, 256), dtype=torch.float16), 4, -1),
                 "4chunks_16_256": (cached_randn((16, 256), dtype=torch.float16), 4, -1),
             }
-        }
+        },
     }
 
     def __init__(self, *args, **kwargs):
