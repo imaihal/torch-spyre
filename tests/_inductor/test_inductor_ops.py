@@ -816,8 +816,15 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_chunk", "test_chunk_cpu"): {
             "param_sets": {
                 # Support 2d input and chunk with stickdim
+                "2chunks_128_512": (
+                    cached_randn((128, 512), dtype=torch.float16),
+                    2,
+                    -1,
+                ),
+                "2chunks_68_512": (cached_randn((68, 512), dtype=torch.float16), 2, -1),
                 "2chunks_64_512": (cached_randn((64, 512), dtype=torch.float16), 2, -1),
                 "2chunks_64_256": (cached_randn((64, 256), dtype=torch.float16), 2, -1),
+                "2chunks_68_128": (cached_randn((68, 128), dtype=torch.float16), 2, -1),
                 "2chunks_64_128": (cached_randn((64, 128), dtype=torch.float16), 2, -1),
                 "2chunks_32_128": (cached_randn((32, 128), dtype=torch.float16), 2, -1),
                 "2chunks_2_128": (cached_randn((2, 128), dtype=torch.float16), 2, -1),
