@@ -284,6 +284,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "2d_dim_1": (1, cached_randn((67, 256))),  # sparse tensor output
                 # "2d_dim_01": ([0, 1], cached_randn((67, 256))), # spyre scalar represented as 1d instead of 0d
                 # "3d_dim_0": (0, cached_randn((67, 71, 256), scale=0.01)), # layout needs repermutation
+                # "3d_dim_1": (1, cached_randn((67, 71, 256), scale=0.01)),
                 "3d_dim_1": (1, cached_randn((67, 71, 256), scale=0.01)),
                 "3d_dim_2": (
                     2,
@@ -304,7 +305,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 # "6d_dim_-1_1": (-1, cached_randn((1, 1, 256, 256, 48, 128))), # granitemoehybrid
                 # "6d_dim_-1_2": (-1, cached_randn((1, 1, 256, 256, 48, 1))), # granitemoehybrid
                 # "6d_dim_3_2": (3, cached_randn((1, 1, 256, 256, 48, 64))), # granitemoehybrid
-                # "6d_dim_2_2": (2, cached_randn((1, 1, 256, 48, 64, 128))), # granitemoehybrid
+                "6d_dim_2_2": (
+                    2,
+                    cached_randn((1, 1, 256, 48, 64, 128), scale=0.01),
+                ),  # granitemoehybrid, need 'scale' to avoid float16 rounding errors
             },
         },
         ("test_sum_keepdim1", "test_reduce_keepdim1_cpu"): {
