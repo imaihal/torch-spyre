@@ -284,7 +284,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "2d_dim_1": (1, cached_randn((67, 256))),  # sparse tensor output
                 # "2d_dim_01": ([0, 1], cached_randn((67, 256))), # spyre scalar represented as 1d instead of 0d
                 # "3d_dim_0": (0, cached_randn((67, 71, 256), scale=0.01)), # layout needs repermutation
-                # "3d_dim_1": (1, cached_randn((67, 71, 256), scale=0.01)),
                 "3d_dim_1": (1, cached_randn((67, 71, 256), scale=0.01)),
                 "3d_dim_2": (
                     2,
