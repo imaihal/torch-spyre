@@ -233,3 +233,37 @@ def spyre__embedding(
     """
     # TODO: Remove this fallback once we enable gather/scatter ops on spyre
     return aten.embedding(weight, indices, padding_idx, scale_grad_by_freq, sparse)
+
+
+@register_fallback([aten.scatter.value, aten.scatter.src])
+def spyre__scatter(input, dim, index, src_or_value, **kwargs):
+    """
+    Fallback for torch.scatter and torch.Tensor.scatter_.
+
+    Scatter requires indirect indexing (output[index[i]] = src[i]), which is not
+    supported by Spyre's current pointwise operation framework.
+
+    Supports both:
+    - scatter(input, dim, index, src) - scatter from source tensor
+    - scatter(input, dim, index, value) - scatter a scalar value
+    """
+    # TODO: Remove this fallback once we enable gather/scatter ops on spyre
+    return torch.scatter(input, dim, index, src_or_value, **kwargs)
+
+
+@register_fallback([aten.masked_scatter.default])
+def spyre__masked_scatter(input, mask, source, **kwargs):
+    """
+    Fallback for torch.masked_scatter.
+
+    Masked scatter copies elements from source into input at positions where mask is True.
+    This requires conditional indirect indexing, which is not supported by Spyre's
+    current pointwise operation framework.
+
+    Args:
+        input: The destination tensor
+        mask: Boolean mask tensor (same shape as input)
+        source: Source tensor (flattened values to scatter)
+    """
+    # TODO: Remove this fallback once we enable gather/scatter ops on spyre
+    return torch.masked_scatter(input, mask, source, **kwargs)
