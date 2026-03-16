@@ -880,6 +880,89 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d": (cached_randn((4, 17, 256, 128), dtype=torch.float16),),
             },
         },
+        ("test_scatter_value", "test_scatter_value_cpu"): {
+            "param_sets": {
+                "2d_dim0": (
+                    0,
+                    cached_randn((3, 5), dtype=torch.float16),
+                    torch.tensor([[0, 1, 2, 0]]),
+                    1,
+                ),
+                "2d_dim1": (
+                    1,
+                    cached_randn((3, 5), dtype=torch.float16),
+                    torch.tensor([[0, 1, 2, 0]]),
+                    1,
+                ),
+                "granite_moe_gates": (
+                    # From Granite MoE Hybrid: gates = zeros.scatter(1, top_k_indices, 1)
+                    # Creates gate matrix for expert routing
+                    1,
+                    torch.zeros((11, 64), dtype=torch.float16),
+                    torch.randint(0, 64, (11, 6), dtype=torch.int64),
+                    1,
+                ),
+            },
+        },
+        ("test_scatter_src", "test_scatter_src_cpu"): {
+            "param_sets": {
+                "2d_dim0": (
+                    0,
+                    cached_randn((3, 5), dtype=torch.float16),
+                    torch.tensor([[0, 1, 2, 0]]),
+                    torch.arange(1, 5, dtype=torch.float16).reshape(1, 4),
+                ),
+                "2d_dim1": (
+                    1,
+                    cached_randn((5, 3), dtype=torch.float16),
+                    torch.tensor([[0, 1, 2]]),
+                    torch.arange(1, 4, dtype=torch.float16).reshape(1, 3),
+                ),
+                "gpt_router_scores": (
+                    # From GPT model: router_scores = torch.zeros_like(router_logits).scatter_(1, router_indices, router_top_value)
+                    1,
+                    cached_randn((1, 32), dtype=torch.float16),
+                    torch.randint(0, 32, (1, 4), dtype=torch.int64),
+                    cached_randn((1, 4), dtype=torch.float16),
+                ),
+            },
+        },
+        ("test_masked_scatter", "test_masked_scatter_cpu"): {
+            "param_sets": {
+                "1d": (
+                    torch.tensor([1, 2, 3, 4, 5], dtype=torch.float16),
+                    torch.tensor([False, True, False, True, False]),
+                    torch.tensor([10, 20], dtype=torch.float16),
+                ),
+                "2d": (
+                    torch.zeros((3, 4), dtype=torch.float16),
+                    torch.tensor(
+                        [
+                            [True, False, True, False],
+                            [False, True, False, True],
+                            [True, True, False, False],
+                        ]
+                    ),
+                    torch.arange(1, 7, dtype=torch.float16),
+                ),
+                "granite_speech_embeddings": (
+                    lambda: (
+                        # From Granite Speech model: inputs_embeds.masked_scatter(mask, audio_embeds)
+                        cached_randn((1, 239, 4096), dtype=torch.float16),
+                        (mask := torch.rand((1, 239, 1)) < 0.1),
+                        cached_randn((mask.sum().item(), 4096), dtype=torch.float16),
+                    )
+                )(),
+                "llava_next_image_embeddings": (
+                    lambda: (
+                        # From LLaVA-NeXT: inputs_embeds.masked_scatter(special_image_mask, image_features)
+                        cached_randn((1, 6301, 2048), dtype=torch.float16),
+                        (mask := torch.rand((1, 6301, 2048)) < 0.9),
+                        cached_randn((mask.sum().item(),), dtype=torch.float16),
+                    )
+                )(),
+            },
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -1096,6 +1179,27 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         output = compiled(64.0, device="spyre")
 
         _ = output.cpu()
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_scatter_value_cpu(self, dim, input, index, value):
+        def fn(input, index):
+            return torch.scatter(input, dim, index, value)
+
+        compare_with_cpu(fn, input, index)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_scatter_src_cpu(self, dim, input, index, src):
+        def fn(input, index, src):
+            return torch.scatter(input, dim, index, src)
+
+        compare_with_cpu(fn, input, index, src)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_masked_scatter_cpu(self, input, mask, source):
+        def fn(input, mask, source):
+            return torch.masked_scatter(input, mask, source)
+
+        compare_with_cpu(fn, input, mask, source)
 
 
 if __name__ == "__main__":
