@@ -948,17 +948,25 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "granite_speech_embeddings": (
                     lambda: (
                         # From Granite Speech model: inputs_embeds.masked_scatter(mask, audio_embeds)
-                        cached_randn((1, 239, 4096), dtype=torch.float16),
-                        (mask := torch.rand((1, 239, 1)) < 0.1),
-                        cached_randn((mask.sum().item(), 4096), dtype=torch.float16),
+                        # Mask broadcasts from (1,239,1) to (1,239,4096), marking entire rows.
+                        # Source shape (mask_count, 4096) provides row-wise replacement values.
+                        cached_randn((1, 239, 4096), dtype=torch.float16),  # input
+                        (mask := torch.rand((1, 239, 1)) < 0.1),  # mask
+                        cached_randn(
+                            (mask.sum().item(), 4096), dtype=torch.float16
+                        ),  # source
                     )
                 )(),
                 "llava_next_image_embeddings": (
                     lambda: (
                         # From LLaVA-NeXT: inputs_embeds.masked_scatter(special_image_mask, image_features)
-                        cached_randn((1, 6301, 2048), dtype=torch.float16),
-                        (mask := torch.rand((1, 6301, 2048)) < 0.9),
-                        cached_randn((mask.sum().item(),), dtype=torch.float16),
+                        # Element-wise mask (1,6301,2048) marks individual elements without broadcasting.
+                        # Source is 1D flattened tensor, consumed sequentially for each True in mask.
+                        cached_randn((1, 6301, 2048), dtype=torch.float16),  # input
+                        (mask := torch.rand((1, 6301, 2048)) < 0.9),  # mask
+                        cached_randn(
+                            (mask.sum().item(),), dtype=torch.float16
+                        ),  # source
                     )
                 )(),
             },
