@@ -231,7 +231,7 @@ def spyre__embedding(
     Embedding requires indirect indexing (weight[indices]), which is not
     supported by Spyre's current pointwise operation framework.
     """
-    # TODO: Remove this fallback once we enable scatter ops on spyre
+    # TODO: Remove this fallback once we enable gather/scatter ops on spyre
     return aten.embedding(weight, indices, padding_idx, scale_grad_by_freq, sparse)
 
 
