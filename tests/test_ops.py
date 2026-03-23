@@ -435,6 +435,7 @@ class TestOps(TestCase):
             z, torch.addmm(mat, x, y), rtol=self.rtol, atol=self.atol
         )
 
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_addmm_ab_bc_scaled(self):
         mat = torch.randn(self.mm_a * self.mm_c, dtype=self.dtype).view(
             self.mm_a, self.mm_c
@@ -732,6 +733,34 @@ class TestOps(TestCase):
         ).to("cpu")
 
         torch.testing.assert_close(cpu_y, spyre_y, rtol=self.rtol, atol=self.atol)
+
+    def test_linear_2d_no_bias(self):
+        x = torch.randn(67, 256, dtype=self.dtype)
+        layer = torch.nn.Linear(256, 128, bias=False, dtype=self.dtype)
+        expected = layer(x)
+        actual = layer.to("spyre")(x.to("spyre")).cpu()
+        torch.testing.assert_close(expected, actual, rtol=self.rtol, atol=self.atol)
+
+    def test_linear_2d_bias(self):
+        x = torch.randn(67, 256, dtype=self.dtype)
+        layer = torch.nn.Linear(256, 128, bias=True, dtype=self.dtype)
+        expected = layer(x)
+        actual = layer.to("spyre")(x.to("spyre")).cpu()
+        torch.testing.assert_close(expected, actual, rtol=self.rtol, atol=self.atol)
+
+    def test_linear_3d_no_bias(self):
+        x = torch.randn(3, 17, 256, dtype=self.dtype)
+        layer = torch.nn.Linear(256, 128, bias=False, dtype=self.dtype)
+        expected = layer(x)
+        actual = layer.to("spyre")(x.to("spyre")).cpu()
+        torch.testing.assert_close(expected, actual, rtol=self.rtol, atol=self.atol)
+
+    def test_linear_3d_bias(self):
+        x = torch.randn(3, 17, 256, dtype=self.dtype)
+        layer = torch.nn.Linear(256, 128, bias=True, dtype=self.dtype)
+        expected = layer(x)
+        actual = layer.to("spyre")(x.to("spyre")).cpu()
+        torch.testing.assert_close(expected, actual, rtol=self.rtol, atol=self.atol)
 
     @unittest.skip("TODO: Needs more debug")
     def test_all_ops(self):
