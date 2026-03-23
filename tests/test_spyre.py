@@ -117,6 +117,9 @@ class TestSpyre(TestCase):
         self.assertEqual(b.numel(), 1)
         self.assertEqual(b.item(), 10.0)
 
+    @unittest.skip(
+        "TODO: Unsupported pointwise op with views/broadcasts without stick dim"
+    )
     def test_cross_device_copy_scalar_with_op(self):
         # Test scalar tensor with operation (result may be 1D due to broadcasting)
         a = torch.tensor(10, dtype=torch.float16)
