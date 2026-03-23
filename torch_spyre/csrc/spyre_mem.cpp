@@ -682,7 +682,7 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
       // Restore the original scalar shape metadata on the Spyre tensor
       auto spyre_tensor_impl =
           static_cast<SpyreTensorImpl*>(dst.unsafeGetTensorImpl());
-      spyre_tensor_impl->dma_sizes = {};  // Empty vector for scalar
+      spyre_tensor_impl->dma_sizes = {};    // Empty vector for scalar
       spyre_tensor_impl->dma_strides = {};  // Empty vector for scalar
       // Also restore the host-side shape to be 0D
       spyre_tensor_impl->set_sizes_contiguous({});
