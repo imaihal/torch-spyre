@@ -676,15 +676,33 @@ at::Tensor spyre_copy_from(const at::Tensor& self, const at::Tensor& dst,
 
   if (self.is_cpu() && dst.is_privateuseone()) {
     if (self.dim() == 0) {
+      // For scalar tensors, reshape to 1D for the copy operation
       at::Tensor tmp_tensor = self.reshape({1});
       copy_host_to_device(tmp_tensor, dst);
+      // Restore the original scalar shape metadata on the Spyre tensor
+      auto spyre_tensor_impl =
+          static_cast<SpyreTensorImpl*>(dst.unsafeGetTensorImpl());
+      spyre_tensor_impl->dma_sizes = {};  // Empty vector for scalar
+      spyre_tensor_impl->dma_strides = {};  // Empty vector for scalar
+      // Also restore the host-side shape to be 0D
+      spyre_tensor_impl->set_sizes_contiguous({});
     } else {
       copy_host_to_device(self, dst);
     }
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_cpu()) {
-    copy_device_to_host(self, dst);
+    if (dst.dim() == 0) {
+      // Destination is a scalar tensor
+      // we need to handle the fact that Spyre stores it as 1D internally
+      // Create a temporary 1D tensor to receive the data from Spyre
+      at::Tensor tmp_tensor = dst.reshape({1});
+      copy_device_to_host(self, tmp_tensor);
+      // The data is now in tmp_tensor, which shares storage with dst
+      // Since they share storage, dst now has the correct value
+    } else {
+      copy_device_to_host(self, dst);
+    }
     return dst;
 
   } else if (self.is_privateuseone() && dst.is_privateuseone()) {

@@ -70,6 +70,11 @@ def get_host_dim_size(layout: FixedTiledLayout, host_dim_idx: int) -> int:
 
     dl = layout.device_layout
 
+    # Special case: scalar tensors have all wildcard dimensions (dim_map = [-1, -1])
+    # For these, we can't parallelize, so return 1
+    if all(dim == -1 for dim in dl.dim_map):
+        return 1
+
     # Use dim_map to find the device dimension that corresponds to this host dimension
     # For tiled dimensions (appearing multiple times in dim_map), we use the first occurrence
     # which corresponds to the outermost device dimension for that host dimension

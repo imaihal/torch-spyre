@@ -107,9 +107,18 @@ class TestSpyre(TestCase):
             print("Printing failed:", e)
             assert False, "Spyre backend should support tensor printing"
 
-    @unittest.skip("TODO: Support 0-dim tensors in Spyre")
     def test_cross_device_copy_scalar(self):
-        # scalar tensor becomes 1D tensor on Spyre
+        # Test that scalar tensors preserve their 0D shape in simple round-trip
+        a = torch.tensor(10, dtype=torch.float16)
+        # Simple round-trip without operations
+        b = a.to(device="spyre").to(device="cpu")
+        # After round-trip, scalar tensor should still be 0D
+        self.assertEqual(b.ndim, 0, "Scalar tensor should remain 0D after round-trip")
+        self.assertEqual(b.numel(), 1)
+        self.assertEqual(b.item(), 10.0)
+
+    def test_cross_device_copy_scalar_with_op(self):
+        # Test scalar tensor with operation (result may be 1D due to broadcasting)
         a = torch.tensor(10, dtype=torch.float16)
         # TODO: Remove torch.tensor of add scalar when constants are supported in eager
         b = (
@@ -117,9 +126,10 @@ class TestSpyre(TestCase):
             .add(torch.tensor([2.0], dtype=torch.float16, device="spyre"))
             .to(device="cpu")
         )
+        # After operation with 1D tensor, result is 1D (broadcasting behavior)
         self.assertEqual(b.ndim, 1)
         self.assertEqual(b.numel(), 1)
-        self.assertEqual(b.item(), a + 2)
+        self.assertEqual(b.item(), 12.0)
 
     def test_cross_device_copy(self):
         a = torch.rand(10, dtype=torch.float16)
