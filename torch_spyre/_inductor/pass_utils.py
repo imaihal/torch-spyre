@@ -17,14 +17,15 @@ from typing import NamedTuple
 from sympy import Expr, Symbol
 
 import sympy
-from torch._inductor.ir import FixedLayout
+from torch._inductor.ir import FixedLayout, Pointwise, Reduction
 from torch._inductor.scheduler import SchedulerNode
 from torch._inductor.dependencies import MemoryDep
 from torch._inductor.utils import sympy_subs
 from torch._inductor.virtualized import V
+from torch_spyre._inductor.errors import Unsupported
 
 from .ir import FixedTiledLayout
-from .views import compute_device_coordinates, compute_coordinates
+from .views import compute_coordinates
 
 
 class SchedNodeArg(NamedTuple):
@@ -52,6 +53,7 @@ def is_wildcard(s: Symbol) -> bool:
     return s.name.startswith("*_")
 
 
+# @deprecated("switch to _coordinates")
 def map_dims_to_vars(layout: FixedLayout, index: Expr) -> dict[int, Symbol]:
     """
     Construct a mapping from the dimensions of layout
@@ -80,11 +82,20 @@ def host_coordinates(layout: FixedLayout, dep: MemoryDep) -> list[sympy.Expr]:
 
 
 def device_coordinates(layout: FixedTiledLayout, dep: MemoryDep) -> list[sympy.Expr]:
-    return compute_device_coordinates(
-        layout.size,
-        layout.stride,
+    return compute_coordinates(
         layout.device_layout.device_size,
-        layout.device_layout.dim_map,
+        layout.device_layout.stride_map,
         dep.ranges,
         dep.index,
     )
+
+
+def iteration_space(n: SchedulerNode) -> dict[sympy.Symbol, sympy.Expr]:
+    if isinstance(n.node.data, Pointwise):
+        # The iteration space of a Pointwise is that of its output
+        return next(iter(n.read_writes.writes)).ranges.copy()
+    elif isinstance(n.node.data, Reduction):
+        # The iteration space of a Reduction is that of its input
+        return next(iter(n.read_writes.reads)).ranges.copy()
+    else:
+        raise Unsupported("Unexpected node type")

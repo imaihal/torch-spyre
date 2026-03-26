@@ -14,8 +14,6 @@
 
 import logging
 
-from sympy import Symbol
-
 
 import torch
 from .logging_utils import get_inductor_logger
@@ -52,6 +50,7 @@ from .pass_utils import (
     host_coordinates,
     device_coordinates,
 )
+from .views import matching_dim
 
 logger = get_inductor_logger("stickify")
 
@@ -73,6 +72,7 @@ def device_layout_like(
         return SpyreTensorLayout(
             layout.device_layout.device_size,
             layout.device_layout.dim_map,
+            layout.device_layout.stride_map,
             get_device_dtype(dtype),
         )
     else:
@@ -94,7 +94,10 @@ def device_layout_like(
                 adjusted_device_size[stick_dim_idx] * scaling_factor
             )
         return SpyreTensorLayout(
-            adjusted_device_size, layout.device_layout.dim_map, get_device_dtype(dtype)
+            adjusted_device_size,
+            layout.device_layout.dim_map,
+            layout.device_layout.stride_map,
+            get_device_dtype(dtype),
         )
 
 
@@ -109,26 +112,6 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
         x = args[0]
         x_stl = x.layout.device_layout
         match op:
-            case spyreop.slice.default:
-                if not is_sparse(x_stl):
-                    raise Unsupported("slice on non-sparse tensor")
-                if len(x.layout.size) != 1:
-                    raise Unsupported("slice on non 1-D tensor")
-                stl = SpyreTensorLayout(output.size, output.dtype)
-                return FixedTiledLayout(
-                    output.device, output.dtype, output.size, output.stride, stl
-                )
-
-            case spyreop.swap.default:
-                if not is_sparse(x_stl):
-                    raise Unsupported("swap on non-sparse tensor")
-                if len(x.layout.size) != 1:
-                    raise Unsupported("swap on non 1-D tensor")
-                stl = SpyreTensorLayout(output.size, output.dtype, [0, -1])
-                return FixedTiledLayout(
-                    output.device, output.dtype, output.size, output.stride, stl
-                )
-
             case aten.clone.default:
                 if is_sparse(x_stl):
                     # TODO: Determine whether we already support cloning a sparse tensor
@@ -156,14 +139,11 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
                     # non-stick size one dimensions in the output to the interior
                     # to avoid tiling them.
                     in_device_coords = device_coordinates(x.layout, x.dep)
-                    stick_expr = in_device_coords[-1]
                     if is_sparse(x_stl):
                         raise Unsupported("TODO: unary op with view on sparse tensor")
-
-                    if stick_expr in out_coords:
-                        out_stick_dim = out_coords.index(stick_expr)
-                    else:
-                        out_stick_dim = -1
+                    stick_expr = in_device_coords[-1]
+                    maybe_stick_dim = matching_dim(out_coords, stick_expr)
+                    out_stick_dim = -1 if maybe_stick_dim is None else maybe_stick_dim
                     dim_order = [
                         d
                         for d in range(len(output.size))
@@ -187,7 +167,9 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
             raise Unsupported(
                 f"views not supported for spyre.layernormnorm({x.layout.size})=>{output.size}) "
             )
-        stl = SpyreTensorLayout(x_stl.device_size, x_stl.dim_map, x_stl.device_dtype)
+        stl = SpyreTensorLayout(
+            x_stl.device_size, x_stl.dim_map, x_stl.stride_map, x_stl.device_dtype
+        )
         return FixedTiledLayout(
             output.device, output.dtype, output.size, output.stride, stl
         )
@@ -229,11 +211,8 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
                 )
 
             stick_expr = next(iter(stick_exprs))
-            if stick_expr in out_coords:
-                out_stick_dim = out_coords.index(stick_expr)
-            else:
-                out_stick_dim = -1
-
+            maybe_stick_dim = matching_dim(out_coords, stick_expr)
+            out_stick_dim = -1 if maybe_stick_dim is None else maybe_stick_dim
             dim_order = [d for d in range(len(output.size)) if d != out_stick_dim]
             dim_order += [out_stick_dim]
             stl = SpyreTensorLayout(output.size, output.dtype, dim_order)
@@ -276,10 +255,9 @@ def reduction_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
         out_coords = host_coordinates(output, output_dep)
         x_stick_expr = x_dev_coords[-1]
         y_stick_expr = y_dev_coords[-1]
-        try:
-            x_stick_dim = x_coords.index(x_stick_expr)
-            y_stick_dim = y_coords.index(y_stick_expr)
-        except ValueError:
+        x_stick_dim = matching_dim(x_coords, x_stick_expr)
+        y_stick_dim = matching_dim(y_coords, y_stick_expr)
+        if x_stick_dim is None or y_stick_dim is None:
             raise Unsupported(
                 f"{red.reduction_type}: failed to map stick_dims to host coords"
             )
@@ -287,16 +265,13 @@ def reduction_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
         if (
             x_stick_dim != len(x.layout.size) - 1
             or y_stick_dim != len(y.layout.size) - 1
-            or not isinstance(x_stick_expr, Symbol)
-            or not isinstance(y_stick_expr, Symbol)
         ):
             # TODO: This is a legal PyTorch operation that we cannot execute without inserting restickify operations.
             raise Unsupported(
                 f"Spyre limitation: {red.reduction_type} requires restickify"
             )
-        try:
-            out_stick_dim = out_coords.index(y_stick_expr)
-        except ValueError:
+        out_stick_dim = matching_dim(out_coords, y_stick_expr)
+        if out_stick_dim is None:
             raise Unsupported(
                 f"{red.reduction_type}: failed to map output stick_dim to host coords {out_coords} {y_stick_expr}"
             )
@@ -329,14 +304,10 @@ def reduction_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
         x_dev_coords = device_coordinates(x.layout, x.dep)
         out_coords = host_coordinates(output, output_dep)
         x_stick_expr = x_dev_coords[-1]
-        if not isinstance(x_stick_expr, Symbol) or x_stick_expr == 0:
-            # TODO: Not clear if we can do this or not; defer for now
-            raise Unsupported("reduction with transposed stick dim")
-        sparse = x_stick_expr not in out_coords
-        if sparse:
+        out_stick_dim = matching_dim(out_coords, x_stick_expr)
+        if out_stick_dim is None:
             out_dim_order = list(range(len(output.size))) + [-1]
         else:
-            out_stick_dim = out_coords.index(x_stick_expr)
             out_dim_order = [
                 d for d in list(range(len(output.size))) if d != out_stick_dim
             ]

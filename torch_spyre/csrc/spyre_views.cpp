@@ -27,7 +27,6 @@
 #include <torch/library.h>
 #include <util/sen_data_convert.h>
 
-#include <cassert>
 #include <cstddef>
 #include <set>
 #include <vector>
@@ -74,7 +73,8 @@ SpyreTensorLayout get_squeezed_layout(const SpyreTensorLayout& old_stl,
 
   DEBUGINFO(new_device_size, new_dim_map)
 
-  return SpyreTensorLayout(new_device_size, new_dim_map, old_stl.device_dtype);
+  return SpyreTensorLayout(new_device_size, new_dim_map, old_stl.stride_map,
+                           old_stl.device_dtype);
 }
 
 template <typename Vec>
