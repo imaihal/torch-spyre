@@ -279,8 +279,12 @@ def register_spyre_decompositions_via_dispatchkey(
                     and getattr(x.device, "type", None) != DEVICE_NAME
                     for x in (pytree.tree_leaves(args) + pytree.tree_leaves(kwargs))
                 ):
+                    args_device = [
+                        x.device if isinstance(x, torch.Tensor) else None
+                        for x in (pytree.tree_leaves(args) + pytree.tree_leaves(kwargs))
+                    ]
                     raise RuntimeError(
-                        "Spyre decomposition function called with inputs being on a different device!"
+                        f"Spyre decomposition function called with inputs being on a different device! Args devices: {args_device=}"
                     )
 
                 # Inside a torch.compile context (make_fx tracing, Inductor
@@ -300,11 +304,6 @@ def register_spyre_decompositions_via_dispatchkey(
         return fn
 
     return decomposition_decorator
-
-
-@register_spyre_decomposition([torch.ops.spyre.compact])
-def compact_decomp(x: torch.Tensor) -> torch.Tensor:
-    return torch.ops.spyre.slice(torch.ops.spyre.swap(x))
 
 
 # TODO (imaihal): Inductor applies constant folding to torch.full, which allocates
