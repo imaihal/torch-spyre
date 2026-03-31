@@ -453,16 +453,13 @@ def spyre_rms_norm(
             f"got device={input.device.type}, normalized_shape={normalized_shape}"
         )
 
-    # TODO: limitation with mean on dim=-1, transpose for now to avoid
-    # https://github.com/torch-spyre/torch-spyre/issues/632
-    input = input.transpose(-1, -2).contiguous()
     eps_tensor = torch.ops.spyre.full(
         input.shape, eps, dtype=torch.float16, device="spyre"
     )
     rsqrt_inp = (
-        torch.rsqrt(torch.mean(input * input, dim=-2, keepdim=True)) + eps_tensor
+        torch.rsqrt(torch.mean(input * input, dim=-1, keepdim=True)) + eps_tensor
     )
-    output = (input * rsqrt_inp).transpose(-1, -2).contiguous()
+    output = input * rsqrt_inp
     if weight is not None:
         output = output * weight
     return output
@@ -602,6 +599,30 @@ def spyre__sdpa_overrideable(
         philox_offset,
         None,
     )
+
+
+@register_spyre_decomposition([torch.ops.aten.cat.default])
+def decompose_cat(
+    tensors: list[torch.Tensor],
+    dim: int = 0,
+) -> torch.Tensor:
+    orig_decomp = torch._inductor.decomposition.cat(tensors, dim)
+    if orig_decomp == NotImplemented:
+        expanded_size = 0
+        for t in tensors:
+            expanded_size += t.size(dim)
+        output_size = list(tensors[0].size())
+        output_size[dim] = expanded_size
+        output = tensors[0].new_empty(output_size)
+        offset = 0
+        for input in tensors:
+            output = torch.ops.spyre.overwrite(
+                input=input, output=output, dim=dim, offset=offset
+            )
+            offset += input.size(dim)
+        return output
+    else:
+        return orig_decomp
 
 
 ###############################################################################################
