@@ -84,6 +84,37 @@ def make_tensor_from_conf(
     init = tconf.get("init", "rand")
     init_args = dict(tconf.get("init_args", {}))
 
+    # Handle unique_randn_along_dim initialization
+    if init == "unique_randn_along_dim":
+        # Import from sibling directory using importlib
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        utils_path = Path(__file__).parent.parent / "inductor" / "utils_inductor.py"
+        spec = importlib.util.spec_from_file_location("utils_inductor", utils_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load utils_inductor from {utils_path}")
+        utils_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(utils_module)
+        unique_randn_along_dim = utils_module.unique_randn_along_dim  # type: ignore
+
+        dim = init_args.get("dim", None)
+        min_val = float(init_args.get("min_val", -100.0))
+        max_val = float(init_args.get("max_val", 100.0))
+        warn_precision = init_args.get("warn_precision", True)
+
+        t = unique_randn_along_dim(
+            tuple(shape),
+            dim=dim,
+            min_val=min_val,
+            max_val=max_val,
+            dtype=dtype,
+            seed=seed,
+            warn_precision=warn_precision,
+        )
+        return t
+
     with torch.random.fork_rng(devices=[]):
         assert init == "rand" or init == "randint", f"Unknown init: {init}"
         if seed is not None:
