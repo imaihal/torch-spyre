@@ -86,7 +86,7 @@ def make_tensor_from_conf(
 
     # Handle unique_randn_along_dim initialization
     if init == "unique_randn_along_dim":
-        from tests.inductor.utils_inductor import unique_randn_along_dim
+        from tests.inductor.utils_inductor import unique_randn_along_dim  # type: ignore[attr-defined]
 
         dim = init_args.get("dim", None)
         min_val = float(init_args.get("min_val", -100.0))
