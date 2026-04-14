@@ -365,26 +365,6 @@ def full_decomp(
     return torch.ops.spyre.full(size, fill_value, device, dtype=dtype)
 
 
-@register_spyre_decomposition([torch.ops.aten.gt.Tensor, torch.ops.aten.gt.Tensor_out])
-def gt_decomp(
-    input: torch.Tensor, other: torch.Tensor, *, out: Optional[torch.Tensor] = None
-) -> torch.Tensor:
-    # TODO: Implement greaterthan in the backend compiler
-    out_ge = torch.ge(input, other).to(dtype=torch.float16)
-    out_ne = torch.ne(input, other).to(dtype=torch.float16)
-    return torch.mul(out_ge, out_ne, out=out).to(dtype=torch.bool)
-
-
-@register_spyre_decomposition([torch.ops.aten.lt.Tensor, torch.ops.aten.lt.Tensor_out])
-def lt_decomp(
-    input: torch.Tensor, other: torch.Tensor, *, out: Optional[torch.Tensor] = None
-) -> torch.Tensor:
-    # TODO: Implement lessthan in the backend compiler
-    out_le = torch.le(input, other).to(dtype=torch.float16)
-    out_ne = torch.ne(input, other).to(dtype=torch.float16)
-    return torch.mul(out_le, out_ne, out=out).to(dtype=torch.bool)
-
-
 @register_spyre_decomposition([torch.ops.aten.logical_not])
 def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
     # Currently falling back to torch.zeros_like for dtypes other than bool
@@ -453,12 +433,9 @@ def spyre_rms_norm(
             f"got device={input.device.type}, normalized_shape={normalized_shape}"
         )
 
-    eps_tensor = torch.ops.spyre.full(
-        input.shape, eps, dtype=torch.float16, device="spyre"
-    )
-    rsqrt_inp = (
-        torch.rsqrt(torch.mean(input * input, dim=-1, keepdim=True)) + eps_tensor
-    )
+    mean = torch.mean(input * input, dim=-1, keepdim=True)
+    eps_tensor = torch.ops.spyre.full((1,), eps, dtype=torch.float16, device="spyre")
+    rsqrt_inp = torch.rsqrt(mean + eps_tensor)
     output = input * rsqrt_inp
     if weight is not None:
         output = output * weight
@@ -549,10 +526,11 @@ def spyre__sdpa_overrideable(
     scaling_factor = math.sqrt(scaling_factor)
 
     # TODO (aviros): Figure why this broadcast doesn't work
-    scaling_factor = torch.full_like(query, scaling_factor)
+    scaling_factor_q = torch.full_like(query, scaling_factor)
+    scaling_factor_k = torch.full_like(key, scaling_factor)
 
-    query = query * scaling_factor
-    key = key * scaling_factor
+    query = query * scaling_factor_q
+    key = key * scaling_factor_k
 
     key_t = key.transpose(-2, -1).clone(memory_format=torch.contiguous_format)
 
@@ -617,12 +595,61 @@ def decompose_cat(
         offset = 0
         for input in tensors:
             output = torch.ops.spyre.overwrite(
-                input=input, output=output, dim=dim, offset=offset
+                input=input, output=output, dims=[dim], offsets=[offset]
             )
             offset += input.size(dim)
         return output
     else:
         return orig_decomp
+
+
+@register_spyre_decomposition([torch.ops.aten.constant_pad_nd.default])
+def pad_decomp(
+    input: torch.Tensor,
+    pad: list[int],
+    value: float = 0,
+) -> torch.Tensor:
+    # pad is in reverse dim order: (left_last, right_last, left_2nd_last, right_2nd_last, ...)
+    n_dims_padded = len(pad) // 2
+
+    # Negative pad values (cropping) require reading from a non-zero storage
+    # offset or a sub-stick position, neither of which the SFP supports.
+    if any(p < 0 for p in pad):
+        raise Unsupported(
+            f"constant_pad_nd: negative padding (cropping) is not supported on "
+            f"Spyre (pad={pad})"
+        )
+
+    # Left-padding requires shifting the output start address by the left amount,
+    # which is not yet supported. Tracked in:
+    # https://github.com/torch-spyre/torch-spyre/issues/1480
+    if any(pad[2 * i] > 0 for i in range(n_dims_padded)):
+        raise Unsupported(
+            f"constant_pad_nd: left-padding is not supported on Spyre (pad={pad})"
+        )
+
+    # Build the padded output shape and collect which dimensions need padding.
+    scalar = torch.ops.spyre.full([1], value, input.device, dtype=input.dtype)
+    output_size = list(input.size())
+    dims: list[int] = []
+    offsets: list[int] = []
+    for i in range(n_dims_padded - 1, -1, -1):
+        left = pad[2 * i]
+        right = pad[2 * i + 1]
+        if left + right == 0:
+            continue
+        dim = input.dim() - 1 - i
+        output_size[dim] += left + right
+        dims.append(dim)
+        offsets.append(left)
+
+    if not dims:
+        return input
+
+    output = scalar.expand(output_size).clone()
+    return torch.ops.spyre.overwrite(
+        input=input, output=output, dims=dims, offsets=offsets
+    )
 
 
 ###############################################################################################
