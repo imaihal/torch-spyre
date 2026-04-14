@@ -86,18 +86,7 @@ def make_tensor_from_conf(
 
     # Handle unique_randn_along_dim initialization
     if init == "unique_randn_along_dim":
-        # Import from sibling directory using importlib
-        import importlib.util
-        import sys
-        from pathlib import Path
-
-        utils_path = Path(__file__).parent.parent / "inductor" / "utils_inductor.py"
-        spec = importlib.util.spec_from_file_location("utils_inductor", utils_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Could not load utils_inductor from {utils_path}")
-        utils_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(utils_module)
-        unique_randn_along_dim = utils_module.unique_randn_along_dim  # type: ignore
+        from tests.inductor.utils_inductor import unique_randn_along_dim
 
         dim = init_args.get("dim", None)
         min_val = float(init_args.get("min_val", -100.0))
