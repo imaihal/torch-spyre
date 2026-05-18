@@ -232,6 +232,11 @@ def ensure_default_handler(op_name):
         setattr(cls, op_name, method)
 
 
+def cpu_fallback(op, *args, **kwargs):
+    handler = lowering.fallback_handler(op, add_to_fallback_set=False)
+    return handler(*args, **kwargs)
+
+
 @register_spyre_lowering(torch.ops.aten.mm.default)
 def lower_mm(x, y):
     x.realize()
@@ -724,3 +729,40 @@ def lower_empty(size, device, dtype=None):
     return ir.TensorBox.create(
         SpyreEmptyFallback(op_overload, list(size), device, dtype)
     )
+
+
+@register_spyre_lowering(
+    torch.ops.prims.convert_element_type.default,
+    type_promotion_kind=None,
+)
+def to_dtype(x, dst_dtype):
+    fallback_conversions = {
+        (torch.float32, torch.int64),
+        (torch.int64, torch.float32),
+    }
+    src_dtype = x.get_dtype()
+
+    if src_dtype == dst_dtype:
+        return clone(x)
+
+    if (src_dtype, dst_dtype) in fallback_conversions:
+        return cpu_fallback(torch.ops.spyre.to_dtype_cpu.default, x, dst_dtype)
+
+    return lowering.to_dtype(x, dst_dtype, copy=True)
+
+
+def with_int64_fallback(fn, *args):
+    if not any(x.get_dtype() == torch.int64 for x in args):
+        return fn(*args)
+
+    args = [to_dtype(x, torch.float32) for x in args]
+    output = fn(*args)
+    return to_dtype(output, torch.int64)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.add.Tensor,
+    type_promotion_kind=None,
+)
+def lower_add(x, y):
+    return with_int64_fallback(lowering.add, x, y)
