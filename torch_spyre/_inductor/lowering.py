@@ -232,7 +232,7 @@ def ensure_default_handler(op_name):
         setattr(cls, op_name, method)
 
 
-def cpu_fallback(op, *args, **kwargs):
+def eager_fallback(op, *args, **kwargs):
     handler = lowering.fallback_handler(op, add_to_fallback_set=False)
     return handler(*args, **kwargs)
 
@@ -746,7 +746,8 @@ def to_dtype(x, dst_dtype):
         return clone(x)
 
     if (src_dtype, dst_dtype) in fallback_conversions:
-        return cpu_fallback(torch.ops.spyre.to_dtype_cpu.default, x, dst_dtype)
+        op = torch.ops.spyre.to_dtype_cpu.default
+        return eager_fallback(op, x, dst_dtype)
 
     return lowering.to_dtype(x, dst_dtype, copy=True)
 
