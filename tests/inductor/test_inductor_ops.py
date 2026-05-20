@@ -48,6 +48,8 @@ POINTWISE_BINARY_OPS_DICT = {
     "mul": torch.mul,
     "sub": torch.sub,
     "div": torch.div,
+    "minimum": torch.minimum,
+    "maximum": torch.maximum,
 }
 
 CORE_REDUCTION_OPS_DICT = {
@@ -1809,6 +1811,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((128), dtype=torch.float16),  # weight
                     torch.zeros([128], dtype=torch.float16),  # bias
                 ),
+                "2d_transposed": (
+                    cached_randn((128, 256), dtype=torch.float16).transpose(0, 1),
+                    cached_randn((128), dtype=torch.float16),
+                    torch.zeros([128], dtype=torch.float16),
+                ),
             },
         },
         ("test_rmsnorm", "test_rmsnorm_cpu"): {
@@ -3104,15 +3111,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
             "expect_fail": [
-                "fp16_2d_dim_0",
-                "fp16_2d_dim_1",
-                "fp16_3d_dim_0",
-                "fp16_3d_dim_1",
-                "fp16_3d_dim_2",
-                "fp16_4d_dim_0",
-                "fp16_4d_dim_1",
-                "fp16_4d_dim_2",
-                "fp16_4d_dim_3",
                 "fp32_2d_dim_0",
                 "fp32_2d_dim_1",
                 "fp32_3d_dim_0",
@@ -3241,14 +3239,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
             "expect_fail": [
-                "fp16_2d_dim_0",
-                "fp16_2d_dim_1",
-                "fp16_3d_dim_1",
-                "fp16_3d_dim_2",
-                "fp16_4d_dim_0",
-                "fp16_4d_dim_1",
-                "fp16_4d_dim_2",
-                "fp16_4d_dim_3",
                 "fp32_2d_dim_0",
                 "fp32_2d_dim_1",
                 "fp32_3d_dim_1",
@@ -3354,9 +3344,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_binary_op_cpu(self, op, x, y):
         # Eager mode support varies by op:
         # - torch.eq, torch.ge, torch.gt, torch.lt: work eagerly
-        # - torch.ne, torch.le: aten::ne.Tensor_out / aten::le.Tensor_out not registered
+        # - torch.le: aten::le.Tensor_out not registered
         # - torch.matmul: numerical divergence (close=False) in eager 2d case
-        eager_supported = op in (torch.eq, torch.ge, torch.gt, torch.lt)
+        eager_supported = op in (torch.eq, torch.ge, torch.gt, torch.lt, torch.ne)
         self.compare_with_cpu(op, x, y, run_eager=eager_supported)
 
     def test_linear_fn(self, x, weight, bias):
@@ -3557,15 +3547,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             lambda x: torch.topk(x, k, dim=dim)[0], x, run_eager=False
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support the integer index tensor in "
-            "torch.min(dim) tuple outputs yet (stable error signature: "
-            "Unsupported: operation on DataFormats.IEEE_INT32)"
-        ),
-        strict=True,
-    )
-    def test_min_tuple_output_keepdim0_known_xfail(self):
+    def test_min_tuple_output_keepdim0(self):
         x = unique_randn_along_dim((5, 7), dim=1)
         self.compare_with_cpu(
             lambda x: torch.min(x, dim=1, keepdim=False),
@@ -3573,15 +3555,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support integer index outputs from "
-            "argmin yet (stable error signature: Unsupported: operation on "
-            "DataFormats.IEEE_INT32)"
-        ),
-        strict=True,
-    )
-    def test_argmin_keepdim0_known_xfail(self):
+    def test_argmin_keepdim0(self):
         x = unique_randn_along_dim((5, 7), dim=1)
         self.compare_with_cpu(
             lambda x: torch.argmin(x, dim=1, keepdim=False),
