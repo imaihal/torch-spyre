@@ -736,16 +736,16 @@ def lower_empty(size, device, dtype=None):
     type_promotion_kind=None,
 )
 def to_dtype(x, dst_dtype):
-    fallback_conversions = {
-        (torch.float32, torch.int64),
-        (torch.int64, torch.float32),
-    }
+    from torch_spyre._inductor.dtype_ops import DtypeOpTable
+
     src_dtype = x.get_dtype()
 
     if src_dtype == dst_dtype:
         return clone(x)
 
-    if (src_dtype, dst_dtype) in fallback_conversions:
+    # Check if conversion is supported by backend
+    if DtypeOpTable.get_operator(src_dtype, dst_dtype) is None:
+        # Unsupported conversion - fall back to CPU
         op = torch.ops.spyre.to_dtype_cpu.default
         return eager_fallback(op, x, dst_dtype)
 
