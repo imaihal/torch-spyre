@@ -25,6 +25,7 @@ from torch._inductor.codegen.common import (
     CSEVariable,
     Kernel,
 )
+from torch_spyre._inductor.dtype_ops import DtypeOpTable
 from torch._inductor.ops_handler import DefaultHandler, StoreMode
 from torch._inductor.utils import IndentedBuffer, sympy_subs
 from torch._inductor.virtualized import V
@@ -276,7 +277,13 @@ class SpyreOpFuncs:
 
     @staticmethod
     def to_dtype(x, dtype, src_dtype):
-        return PointwiseOp("to_dtype", [x])
+        assert dtype != src_dtype
+
+        op = DtypeOpTable.get_operator(src_dtype, dtype)
+        if op is None:
+            raise Unsupported(f"type conversion from {src_dtype} to {dtype}")
+
+        return PointwiseOp(op, [x])
 
     @staticmethod
     def truediv(a, b):
@@ -416,6 +423,7 @@ class SpyreKernel(Kernel[CSEVariable]):
                 op in [IDENTITY_OP, RESTICKIFY_OP]
                 or (op in SPYRE_FP32_OPS and arg.device_dtype == DataFormats.IEEE_FP32)
                 or arg.device_dtype == DataFormats.SEN169_FP16
+                or DtypeOpTable.is_dtype_op(op)
             ):
                 raise Unsupported(f"{op} on {arg.device_dtype}")
 
