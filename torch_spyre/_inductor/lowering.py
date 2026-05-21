@@ -763,7 +763,7 @@ def with_int64_fallback(fn, *args):
 
 @register_spyre_lowering(
     torch.ops.aten.add.Tensor,
-    type_promotion_kind=None,  # See NOTE above
+    type_promotion_kind=None,
 )
 def lower_add(x, y):
     return with_int64_fallback(lowering.add, x, y)
@@ -771,7 +771,7 @@ def lower_add(x, y):
 
 @register_spyre_lowering(
     torch.ops.aten.mul.Tensor,
-    type_promotion_kind=None,  # See NOTE above
+    type_promotion_kind=None,
 )
 def lower_mul(x, y):
     return with_int64_fallback(lowering.mul, x, y)
@@ -779,7 +779,7 @@ def lower_mul(x, y):
 
 @register_spyre_lowering(
     torch.ops.aten.sub.Tensor,
-    type_promotion_kind=None,  # See NOTE above
+    type_promotion_kind=None,
 )
 def lower_sub(x, y):
     return with_int64_fallback(lowering.sub, x, y)
