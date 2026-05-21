@@ -761,9 +761,24 @@ def with_int64_fallback(fn, *args):
     return to_dtype(output, torch.int64)
 
 
+# NOTE: We use type_promotion_kind=None instead of DEFAULT for int64 operations
+#
+# ROOT CAUSE: Cannot use type_promotion_kind=DEFAULT with CPU fallback conversions
+#
+# When type_promotion_kind=DEFAULT:
+# 1. PyTorch's FX pass inserts prims.convert_element_type nodes for mixed-type operations
+#    Example: int64 * float32 becomes: mul(convert_element_type(x, float32), y)
+#
+# 2. Our to_dtype lowering uses CPU fallback for int64↔float32 conversion
+#    This creates a fallback IR node that cannot be composed inline
+#
+# 3. When the conversion is used as an argument to another operation, it becomes a
+#    PointwiseOp node that the backend cannot handle
+#    Error: "Unsupported: unexpected argument PointwiseOp(op='to_dtype', ...) to mul"
+#
 @register_spyre_lowering(
     torch.ops.aten.add.Tensor,
-    type_promotion_kind=None,
+    type_promotion_kind=None,  # See NOTE above
 )
 def lower_add(x, y):
     return with_int64_fallback(lowering.add, x, y)
@@ -771,7 +786,7 @@ def lower_add(x, y):
 
 @register_spyre_lowering(
     torch.ops.aten.mul.Tensor,
-    type_promotion_kind=None,
+    type_promotion_kind=None,  # See NOTE above
 )
 def lower_mul(x, y):
     return with_int64_fallback(lowering.mul, x, y)
@@ -779,7 +794,7 @@ def lower_mul(x, y):
 
 @register_spyre_lowering(
     torch.ops.aten.sub.Tensor,
-    type_promotion_kind=None,
+    type_promotion_kind=None,  # See NOTE above
 )
 def lower_sub(x, y):
     return with_int64_fallback(lowering.sub, x, y)
