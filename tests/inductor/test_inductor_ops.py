@@ -55,6 +55,14 @@ POINTWISE_BINARY_OPS_DICT = {
     "maximum": torch.maximum,
 }
 
+POINTWISE_BINARY_OPS_INT64_DICT = {
+    "add": torch.add,
+    "mul": torch.mul,
+    "sub": torch.sub,
+    "minimum": torch.minimum,
+    "maximum": torch.maximum,
+}
+
 CORE_REDUCTION_OPS_DICT = {
     "sum": torch.sum,
     "mean": torch.mean,
@@ -382,6 +390,33 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     ((7, 12, 32, 64),) * 2,
                 ]
             ),
+        },
+        (
+            "test_pointwise_binary_op_int64",
+            "test_binary_op",
+        ): {
+            "ops_dict": POINTWISE_BINARY_OPS_INT64_DICT,
+            "param_sets": {
+                "1d": (
+                    (cached_randn((256,), scale=100.0) * 100).to(torch.int64),
+                    (cached_randn((256,), differentiation=1, scale=100.0) * 100).to(
+                        torch.int64
+                    ),
+                ),
+                "2d": (
+                    (cached_randn((67, 256), scale=100.0) * 100).to(torch.int64),
+                    (cached_randn((67, 256), differentiation=1, scale=100.0) * 100).to(
+                        torch.int64
+                    ),
+                ),
+                "3d": (
+                    (cached_randn((67, 71, 256), scale=100.0) * 100).to(torch.int64),
+                    (
+                        cached_randn((67, 71, 256), differentiation=1, scale=100.0)
+                        * 100
+                    ).to(torch.int64),
+                ),
+            },
         },
         ("test_add_broadcast", "test_add_broadcast"): {
             "param_sets": make_param_dict(

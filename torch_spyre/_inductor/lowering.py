@@ -752,13 +752,25 @@ def to_dtype(x, dst_dtype):
     return lowering.to_dtype(x, dst_dtype, copy=True)
 
 
-def with_int64_fallback(fn, *args):
+def with_int64_fallback(fn, *args, convert_output=True):
+    """
+    Helper to handle int64 operations by converting to fp32.
+
+    Args:
+        fn: The lowering function to call
+        *args: Arguments to pass to fn
+        convert_output: If True, convert output back to int64.
+                       Set to False for operations like div that should return float.
+    """
     if not any(x.get_dtype() == torch.int64 for x in args):
         return fn(*args)
 
     args = [to_dtype(x, torch.float32) for x in args]
     output = fn(*args)
-    return to_dtype(output, torch.int64)
+
+    if convert_output:
+        return to_dtype(output, torch.int64)
+    return output
 
 
 @register_spyre_lowering(
@@ -783,3 +795,19 @@ def lower_mul(x, y):
 )
 def lower_sub(x, y):
     return with_int64_fallback(lowering.sub, x, y)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.minimum.default,
+    type_promotion_kind=None,
+)
+def lower_minimum(x, y):
+    return with_int64_fallback(lowering.minimum, x, y)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.maximum.default,
+    type_promotion_kind=None,
+)
+def lower_maximum(x, y):
+    return with_int64_fallback(lowering.maximum, x, y)
