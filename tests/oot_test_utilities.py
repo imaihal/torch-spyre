@@ -1,5 +1,6 @@
 """
-spyre_test_utilities.py -- Utility functions for the torch-spyre OOT test framework.
+oot_test_utilities.py -- Utility functions for the OOT PyTorch test framework.
+# Copyright Author: Anubhav Jana (Anubhav.Jana97@ibm.com)
 
 """
 
@@ -18,9 +19,31 @@ try:
     import yaml
 except ImportError as _yaml_err:  # pragma: no cover
     raise ImportError(
-        "PyYAML is required for spyre_test_utilities. "
-        "Install it with: pip install pyyaml"
+        "PyYAML is required for oot_test_utilities. Install it with: pip install pyyaml"
     ) from _yaml_err
+
+import torch
+
+
+# ---------------------------------------------------------------------------
+# Device type helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_privateuse1_device_type() -> str:
+    """Return the backend name registered for the privateuse1 device slot.
+
+    torch._C._get_privateuse1_backend_name() returns e.g. "spyre" or whatever
+    name was passed to torch._register_device_module().  This is what
+    cls.device_type will be at test runtime inside PrivateUse1TestBase.
+
+    Falls back to "privateuse1" if no backend has been registered yet (e.g.
+    during import before the backend module is loaded).
+    """
+    try:
+        return torch._C._get_privateuse1_backend_name()
+    except Exception:
+        return "privateuse1"  # fallback if not registered yet
 
 
 """
@@ -38,12 +61,12 @@ def print_test_tags_oot(test_instance, op_tags: List[str] = []) -> None:
     at collection time with per-op tags available only at run time.
 
     Usage in a test method:
-        from spyre_test_utilities import print_test_tags_oot
+        from oot_test_utilities import print_test_tags_oot
         print_test_tags_oot(self, op_tags=op.op_tags)
     """
     method_name = test_instance._testMethodName
     _method_fn = getattr(test_instance.__class__, method_name, None)
-    _method_tags = getattr(_method_fn, "_spyre_method_tags", [])
+    _method_tags = getattr(_method_fn, "_oot_method_tags", [])
     _per_op_tags = [t for t in op_tags if t not in set(_method_tags)]
     _all_tags = _method_tags + _per_op_tags
     # Store for pytest_runtest_makereport hook to work without -s
@@ -59,14 +82,14 @@ def print_test_tags_oot(test_instance, op_tags: List[str] = []) -> None:
 # Provides YAML config merging for multi-config test runs.
 
 # Usage (Python):
-#     from spyre_test_utilities import merge_yaml_configs
+#     from oot_test_utilities import merge_yaml_configs
 
 #     merged_path = merge_yaml_configs(["config_a.yaml", "config_b.yaml"])
 #     # ... run tests ...
 #     os.unlink(merged_path)   # caller is responsible for cleanup
 
 # Usage (bash, via the CLI entry-point at the bottom):
-#     python3 spyre_test_utilities.py config_a.yaml config_b.yaml
+#     python3 oot_test_utilities.py config_a.yaml config_b.yaml
 #     # prints the path of the merged (temp) YAML to stdout
 
 
@@ -134,11 +157,16 @@ def _merge_file_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Merge per-file entries from all configs into a deduplicated list.
 
     Two entries with the same ``path`` value are merged: their ``tests``
-    lists are concatenated (with deduplication by name) and their
-    ``unlisted_test_mode`` is kept from the first occurrence (a warning is
-    emitted if configs disagree).
+    lists are combined and their ``unlisted_test_mode`` is kept from the
+    first occurrence.
 
-    Entries with distinct paths are appended in the order they appear.
+    Test block deduplication within a path:
+    - A block is a TRUE duplicate and dropped only when its ``names``,
+      ``tags``, AND ``edits`` all match an already-seen block exactly.
+    - Blocks that share the same ``names`` but differ in ``tags`` or
+      ``edits`` (e.g. the same test op run for different models/dtypes)
+      are kept as SEPARATE entries so each produces its own tagged variant.
+    - Entries with distinct paths are appended in the order they appear.
     """
     # Preserve insertion order; key = resolved path string.
     merged: Dict[str, Dict[str, Any]] = {}
@@ -159,26 +187,34 @@ def _merge_file_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             incoming_mode = entry.get("unlisted_test_mode", "xfail")
             if existing["unlisted_test_mode"] != incoming_mode:
                 print(
-                    f"[spyre_merge] WARNING: conflicting unlisted_test_mode for "
+                    f"[oot_merge] WARNING: conflicting unlisted_test_mode for "
                     f"path '{path}': keeping '{existing['unlisted_test_mode']}', "
                     f"ignoring '{incoming_mode}'.",
                     file=sys.stderr,
                 )
 
-            # Merge tests: deduplicate by the set of names in each test block.
-            existing_test_names: set = set()
-            for t in existing["tests"]:
-                for n in t.get("names") or []:
-                    existing_test_names.add(n.strip())
-
             for test_block in entry.get("tests") or []:
-                block_names = {n.strip() for n in (test_block.get("names") or [])}
-                # Append the whole block if ANY of its names is new.
-                # (Partial overlaps are very unlikely in practice but if they
-                # occur the block is still added so no test is silently lost.)
-                if not block_names.issubset(existing_test_names):
+                block_names = frozenset(
+                    n.strip() for n in (test_block.get("names") or [])
+                )
+
+                # A block is a TRUE duplicate only when names + tags + edits
+                # all match an already-present block exactly.  Blocks with
+                # the same names but different tags/edits represent distinct
+                # configurations (e.g. same op for different models) and must
+                # be kept as separate entries.
+                is_true_duplicate = any(
+                    frozenset(n.strip() for n in (t.get("names") or [])) == block_names
+                    and t.get("tags") == test_block.get("tags")
+                    and t.get("edits") == test_block.get("edits")
+                    for t in existing["tests"]
+                )
+
+                if not is_true_duplicate:
                     existing["tests"].append(test_block)
-                    existing_test_names.update(block_names)
+                    # Note: we intentionally do NOT track block_names in a
+                    # global "seen names" set here, because the same name is
+                    # reused across configs with different tags.
 
     return list(merged.values())
 
@@ -192,7 +228,7 @@ def merge_yaml_configs(
     config_paths: Sequence[str | os.PathLike],
     *,
     output_dir: Optional[str | os.PathLike] = None,
-    prefix: str = "_spyre_merged_config_",
+    prefix: str = "_oot_merged_config_",
     suffix: str = ".yaml",
 ) -> str:
     """Merge multiple YAML test-suite configs into one temporary file.
@@ -308,9 +344,9 @@ def _cli() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="spyre_test_utilities",
+        prog="oot_test_utilities",
         description=(
-            "Merge multiple torch-spyre YAML test configs into one temporary file.\n"
+            "Merge multiple OOT PyTorch YAML test configs into one temporary file.\n"
             "Prints the merged file path to stdout. The caller must delete it."
         ),
     )
@@ -339,7 +375,7 @@ def _cli() -> None:
     merged = merge_yaml_configs(args.configs, output_dir=args.output_dir)
     # Emit a human-readable note to stderr so it doesn't pollute the path.
     print(
-        f"[spyre_merge] Merged {len(args.configs)} config(s) -> {merged}",
+        f"[oot_merge] Merged {len(args.configs)} config(s) -> {merged}",
         file=sys.stderr,
     )
     # The path goes to stdout for shell capture.

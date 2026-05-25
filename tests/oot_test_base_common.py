@@ -1,5 +1,6 @@
 """
 Shared class and methods for all OOT PyTorch test overrides.
+# Copyright Author: Anubhav Jana (Anubhav.Jana97@ibm.com)
 
 """
 
@@ -8,10 +9,11 @@ import json
 from typing import Dict, List, Optional, Set
 import warnings
 
+import regex as re
 import pytest  # type: ignore
 import torch
 
-from spyre_test_constants import (
+from oot_test_constants import (
     DEFAULT_FLOATING_PRECISION,
     ENV_TEST_CONFIG,
     MODE_MANDATORY_SUCCESS,
@@ -20,18 +22,18 @@ from spyre_test_constants import (
     MODE_XFAIL_STRICT,
     UNLISTED_MODE_XFAIL,
 )
-from spyre_test_matching import (
+from oot_test_matching import (
     extract_dtype_from_name,
     parse_dtype,
 )
-from spyre_test_parsing import (
+from oot_test_parsing import (
     FileEntry,
     apply_op_config_overrides,
     load_yaml_config,
     resolve_current_file,
 )
 
-from spyre_upstream_patcher import (
+from oot_upstream_patcher import (
     _OOTDtypePatcher,
     _OOTModuleMarkerPatcher,
     _OOTOnlyOnPatcher,
@@ -42,17 +44,18 @@ from spyre_upstream_patcher import (
     _OOTOpMarkerPatcher,
     _OOTPrecisionOverridePatcher,
 )
-from spyre_test_config_models import (
+from oot_test_config_models import (
     OOTTestConfig,
     Precision,
     SupportedOpConfig,
     SupportedModuleConfig,
     TestEntry,
 )
-from spyre_test_common_methods_invocations import (
+from oot_test_common_methods_invocations import (
     create_module_inputs_func_from_yaml,
     create_module_inputs_func_from_config,
 )
+from oot_test_utilities import _get_privateuse1_device_type
 
 warnings.filterwarnings("ignore", category=pytest.PytestUnknownMarkWarning)
 
@@ -75,14 +78,7 @@ def _log_error(msg: str) -> None:
 # Resolve the actual backend name registered for privateuse1.
 # torch._C._get_privateuse1_backend_name() returns e.g. "spyre".
 # This is what slf.device_type will be at test runtime.
-def _get_privateuse1_device_type() -> str:
-    try:
-        return torch._C._get_privateuse1_backend_name()
-    except Exception:
-        return "privateuse1"  # fallback if not registered yet
-
-
-_SPYRE_DEVICE_TYPE: str = _get_privateuse1_device_type()
+_OOT_DEVICE_TYPE: str = _get_privateuse1_device_type()
 
 
 # ---------------------------------------------------------------------------
@@ -112,26 +108,120 @@ def remove_builtin_privateuse1_test_base():
 remove_builtin_privateuse1_test_base()
 
 
-def _build_test_entry_map(file_entry: FileEntry) -> Dict[str, TestEntry]:
-    """Build {method_name -> TestEntry} from file_entry.tests.
+# ---------------------------------------------------------------------------
+# Multi-entry test map helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_test_entry_map(file_entry: FileEntry) -> Dict[str, List["TestEntry"]]:
+    """Build {method_name -> [TestEntry, ...]} from file_entry.tests.
 
     A single TestEntry can cover multiple test ids via name: [list].
-    Each method_name in the list gets its own entry in the map pointing
-    to the same TestEntry object so _should_run() can look up by method_name.
+    Each method_name in the list gets its own entry in the map.
+
+    This supports multiple TestEntry objects per method_name.
+    This is needed when two configs target the same test name with different tags/dtypes
+    (e.g. the same op tested for two different models).
+    The correct entry for a given variant is resolved later by ``_select_entry_for_variant``
+    once the dtype is known from the instantiated method name.
     """
-    result: Dict[str, TestEntry] = {}
+    result: Dict[str, List[TestEntry]] = {}
     for entry in file_entry.tests:
         for method_name in entry.method_names():
-            if method_name in result:
-                import warnings
-
-                warnings.warn(
-                    f"test method {method_name!r} appears in multiple TestEntry "
-                    f"blocks in the YAML. The last entry will take precedence.",
-                    stacklevel=2,
-                )
-            result[method_name] = entry
+            result.setdefault(method_name, []).append(entry)
     return result
+
+
+def _entry_dtype_set(
+    entry: "TestEntry",
+    global_supported_dtypes: Optional[Set[torch.dtype]],
+) -> Optional[Set[torch.dtype]]:
+    """Return the effective dtype set for *entry*.
+
+    Priority (highest to lowest):
+      1. entry.edits.dtypes.include  -- explicit per-entry dtype list
+      2. global_supported_dtypes     -- global filter from the YAML global section
+      3. None                        -- no filtering; all dtypes match
+
+    Returns None when neither the entry nor the global config restricts dtypes,
+    meaning the entry is considered compatible with any dtype.
+    """
+    included = entry.edits.dtypes.resolved_include()
+    if included:
+        return included
+    return global_supported_dtypes  # may itself be None
+
+
+# Matches "test_model_ops_db_<unique>__<idx>_<device>_<dtype>", capturing
+# the op unique_name key into model_ops_entry_by_unique_name.
+_MODEL_OPS_VARIANT_RE = re.compile(
+    r"^test_model_ops_db_(?P<unique>.+?__\d+)_[A-Za-z0-9]+_\w+$"
+)
+
+
+def _select_entry_by_op_index(method_name: str) -> Optional["TestEntry"]:
+    """Resolve the TestEntry for a test_model_ops_db variant via the
+    authoritative unique_name mapping; returns None to let callers fall
+    back to the dtype heuristic."""
+    m = _MODEL_OPS_VARIANT_RE.match(method_name)
+    if not m:
+        return None
+    try:
+        from models.test_model_ops_v2 import (  # type: ignore
+            model_ops_entry_by_unique_name,
+        )
+    except ImportError:
+        return None
+    return model_ops_entry_by_unique_name.get(m.group("unique"))
+
+
+def _select_entry_for_variant(
+    entries: List["TestEntry"],
+    method_name: str,
+    global_supported_dtypes: Optional[Set[torch.dtype]],
+) -> "TestEntry":
+    """Pick the best-matching TestEntry for a concrete variant method name.
+
+    When only one entry exists the choice is trivial.  When multiple entries
+    share the same base test name merged from different configs we select
+    by matching the dtype embedded in *method_name* against each entry's
+    effective dtype set.
+
+    Selection rules:
+      1. Entry whose effective dtype set contains the variant's dtype.
+      2. Entry with no dtype restriction (effective set is None) acts as
+         a wildcard / fallback.
+      3. First entry in the list (last-resort fallback to old behaviour).
+
+    The list order reflects YAML insertion order so config-A entries take
+    precedence over config-B entries for identical dtype sets.
+    """
+    if len(entries) == 1:
+        return entries[0]
+
+    dtype_str = extract_dtype_from_name(method_name)
+    variant_dtype: Optional[torch.dtype] = None
+    if dtype_str:
+        try:
+            variant_dtype = parse_dtype(dtype_str)
+        except ValueError:
+            pass
+
+    # Pass 1 - strict dtype match
+    if variant_dtype is not None:
+        for entry in entries:
+            eset = _entry_dtype_set(entry, global_supported_dtypes)
+            if eset is not None and variant_dtype in eset:
+                return entry
+
+    # Pass 2 - wildcard entry (no dtype restriction)
+    for entry in entries:
+        eset = _entry_dtype_set(entry, global_supported_dtypes)
+        if eset is None:
+            return entry
+
+    # Pass 3 - fallback: return first entry
+    return entries[0]
 
 
 def _extract_op_name_from_method(
@@ -139,7 +229,7 @@ def _extract_op_name_from_method(
 ) -> Optional[str]:
     """Extract the op name from a parametrized method name.
 
-    method_name: test_scalar_support_add_spyre_float16
+    method_name: test_scalar_support_add_<device>_float16
     base_test_name: test_scalar_support
     returns: "add"
 
@@ -147,11 +237,10 @@ def _extract_op_name_from_method(
     """
     if not method_name.startswith(base_test_name + "_"):
         return None
-    remainder = method_name[len(base_test_name) + 1 :]  # "add_spyre_float16"
+    remainder = method_name[len(base_test_name) + 1 :]  # "add_<device>_float16"
     # op name is the first segment before the device suffix
-    device_type = "spyre"  # or read from _SPYRE_DEVICE_TYPE
-    if f"_{device_type}_" in remainder:
-        return remainder.split(f"_{device_type}_")[0]  # "add"
+    if f"_{_OOT_DEVICE_TYPE}_" in remainder:
+        return remainder.split(f"_{_OOT_DEVICE_TYPE}_")[0]
     return None
 
 
@@ -166,13 +255,14 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
 
     All configuration is loaded lazily from the YAML file pointed to by
     PYTORCH_TEST_CONFIG.  The YAML is validated by Pydantic on load.
-    See spyre_test_config_schema.json for the full schema.
+    See oot_test_config_schema.json for the full schema.
     """
 
     device_type: str = "privateuse1"
     precision: float = DEFAULT_FLOATING_PRECISION
 
-    TEST_ENTRIES: Dict[str, "TestEntry"] = {}  # {method_name -> TestEntry}
+    # multiple configs targeting the same test name with different tags/dtypes.
+    TEST_ENTRIES: Dict[str, List["TestEntry"]] = {}  # {method_name -> [TestEntry, ...]}
     UNLISTED_TEST_MODE: str = UNLISTED_MODE_XFAIL  # file-level default
     SUPPORTED_OPS_CONFIG: Dict[str, "SupportedOpConfig"] = {}  # {op_name -> config}
     SUPPORTED_MODULES_CONFIG: Dict[
@@ -189,12 +279,11 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # PrivateUse1TestBase.setUpClass sets cls.device_type = "spyre"
-        # (the registered backend name). This mutates the base class's
-        # device_type, causing subsequent instantiate_device_type_tests calls
-        # to generate class names like TestOldViewOpsSPYRE instead of
-        # TestOldViewOpsPRIVATEUSE1, which then get filtered out by
-        # PYTORCH_TESTING_DEVICE_ONLY_FOR=privateuse1.
+        # PrivateUse1TestBase.setUpClass sets cls.device_type to the registered
+        # backend name (e.g. "spyre").  This mutates the base class's device_type,
+        # causing subsequent instantiate_device_type_tests calls to generate class
+        # names like TestOldViewOpsSPYRE instead of TestOldViewOpsPRIVATEUSE1,
+        # which then get filtered out by PYTORCH_TESTING_DEVICE_ONLY_FOR=privateuse1.
         # Reset TorchTestBase.device_type to "privateuse1" so subsequent
         # calls generate the correct class name.
         TorchTestBase.device_type = "privateuse1"
@@ -232,6 +321,8 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
 
         file_entry: FileEntry = resolve_current_file(config, path)
 
+        # Build multi-entry map: same method_name can have multiple TestEntry
+        # objects when configs differ in tags/dtypes for the same test.
         cls.TEST_ENTRIES = _build_test_entry_map(file_entry)
         cls.UNLISTED_TEST_MODE = file_entry.unlisted_test_mode
 
@@ -366,13 +457,26 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
         method_name: str,
         base_test_name: str,
         generic_cls_name: str,
+        entry: Optional["TestEntry"] = None,
     ) -> tuple:
         """Decide the behaviour of test variant based on config modes.
 
+        The ``entry`` parameter is the already-resolved TestEntry for this
+        specific variant (selected by ``_select_entry_for_variant`` in
+        ``instantiate_test``).  Passing it in avoids a second map lookup and
+        ensures the correct entry is used when multiple entries share the same
+        base test name.
+
         Returns (enabled: bool, reason: Optional[str], xfail: bool, strict: bool)
         """
-        # look up the test entry by base_test_name (method name without op/dtype suffix)
-        entry: Optional[TestEntry] = cls.TEST_ENTRIES.get(base_test_name)
+        # If entry was not pre-resolved by the caller, fall back to the old
+        # single-entry lookup for backward compatibility.
+        if entry is None:
+            entries = cls.TEST_ENTRIES.get(base_test_name)
+            if entries:
+                entry = _select_entry_for_variant(
+                    entries, method_name, cls.GLOBAL_SUPPORTED_DTYPES
+                )
 
         # unlisted_test_mode only applies to tests NOT in TEST_ENTRIES
         if entry is not None:
@@ -418,7 +522,7 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
 
         # resolve final decision
         if effective_mode == MODE_SKIP:
-            return False, "Skipped for Spyre", False, False
+            return False, "Skipped by OOT config", False, False
         elif effective_mode == MODE_XFAIL:
             return True, None, True, False  # run, xfail non-strict
         elif effective_mode == MODE_XFAIL_STRICT:
@@ -441,26 +545,39 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
     # ------------------------------------------------------------------
     @classmethod
     def instantiate_test(cls, name, test, *, generic_cls=None):
-        _OOTOnlyOnPatcher(test, _SPYRE_DEVICE_TYPE).patch()
+        _OOTOnlyOnPatcher(test, _OOT_DEVICE_TYPE).patch()
         cls._load_test_suite_config()
-        # print tags to stderr
-        entry = cls.TEST_ENTRIES.get(name)
-        tags = entry.tags if entry is not None else []
-        # test-level tags only — used for method_tags assembly
-        all_tags = tags
+
+        # Retrieve all entries for this base test name.
+        # There may be multiple when different configs target the same test
+        # name with different tags/dtypes (e.g. same op, different models).
+        all_entries_for_name: List[TestEntry] = cls.TEST_ENTRIES.get(name, [])
+
+        # ------------------------------------------------------------------
+        # Collect the union of all tags across all entries for collection-time
+        # summary logging.  The per-variant tag selection happens later in the
+        # new_methods loop where the dtype is known from method_name.
+        # ------------------------------------------------------------------
+        all_tags_union: List[str] = []
+        _seen_union: set = set()
+        for _e in all_entries_for_name:
+            for _t in _e.tags or []:
+                if _t not in _seen_union:
+                    _seen_union.add(_t)
+                    all_tags_union.append(_t)
 
         # Collect op-level tags for collection-time summary print ONLY
         op_tags: List[str] = []
-        if entry is not None:
-            seen_op_tags: set = set()
-            for ops_item in entry.edits.ops.include:
+        seen_op_tags: set = set()
+        for _e in all_entries_for_name:
+            for ops_item in _e.edits.ops.include:
                 for t in ops_item.tags:
                     if t not in seen_op_tags:
                         seen_op_tags.add(t)
                         op_tags.append(t)
 
-        # Print summary at collection time
-        summary_tags = tags + [t for t in op_tags if t not in set(tags)]
+        # Print summary at collection time -- union of all tags
+        summary_tags = all_tags_union + [t for t in op_tags if t not in _seen_union]
         if summary_tags:
             if generic_cls is not None:
                 os.write(
@@ -474,8 +591,8 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
                     f"cannot print tag information"
                 )
 
-        # Store test-level tags only — op-level tags added per-occurrence at run time
-        cls._TEST_LEVEL_TAGS = list(tags)
+        # Store union of test-level tags for backward compat (used by print_test_tags_oot)
+        cls._TEST_LEVEL_TAGS = all_tags_union
 
         # op list filtering
         supported_ops = cls._get_supported_ops()
@@ -492,13 +609,13 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
         included_modules = getattr(cls, "_FILE_LEVEL_INCLUDED_MODULES", None) or set()
         excluded_modules = getattr(cls, "_FILE_LEVEL_EXCLUDED_MODULES", None) or set()
 
-        # Also merge in test-specific includes/excludes if present
-        if entry is not None:
+        # Merge in includes/excludes from ALL entries for this test name
+        for _e in all_entries_for_name:
             included_modules = (
-                included_modules | entry.edits.modules.included_module_names()
+                included_modules | _e.edits.modules.included_module_names()
             )
             excluded_modules = (
-                excluded_modules | entry.edits.modules.excluded_module_names()
+                excluded_modules | _e.edits.modules.excluded_module_names()
             )
 
         if supported_modules is not None or included_modules or excluded_modules:
@@ -509,6 +626,7 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
                 excluded_modules=excluded_modules,
             ).patch()
 
+        # Collect dtype union across all entries for patching
         op_level_dtypes: Set[torch.dtype] = set()
         if cls.SUPPORTED_OPS_CONFIG:
             from torch.testing._internal.common_device_type import ops as _ops_cls
@@ -555,20 +673,21 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
         if module_level_dtypes:
             _OOTModuleDtypePatcher(test, module_level_dtypes).patch()
 
-        if entry is not None:
-            extra_dtypes = entry.edits.dtypes.resolved_include()
-            if extra_dtypes:
-                _OOTDtypePatcher(test, extra_dtypes).patch()
-                _OOTOpDtypeExpander(test, extra_dtypes).patch()
+        # Collect extra dtypes from ALL entries for this test name (union)
+        all_extra_dtypes: Set[torch.dtype] = set()
+        for _e in all_entries_for_name:
+            all_extra_dtypes |= _e.edits.dtypes.resolved_include()
 
+        if all_extra_dtypes:
+            _OOTDtypePatcher(test, all_extra_dtypes).patch()
+            _OOTOpDtypeExpander(test, all_extra_dtypes).patch()
+
+        # Collect precision overrides: merge global + union across all entries.
+        # Per-variant selection happens below in new_methods loop.
         _OOTPrecisionOverridePatcher(
             test,
             global_dtype_precision=cls.GLOBAL_DTYPE_PRECISION,
-            include_dtype_precision=(
-                entry.edits.dtypes.resolved_include_precision()
-                if entry is not None
-                else {}
-            ),
+            include_dtype_precision={},  # handled per-variant below
         ).patch()
 
         # Dynamically adds pytest marker to each of ops and dtype passed to @ops
@@ -583,12 +702,35 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
 
         _tags_to_write: Dict[str, List[str]] = {}
         for method_name in new_methods:
+            # ------------------------------------------------------------------
+            # Select the correct TestEntry for THIS variant using dtype matching.
+            # Instead of using a single shared entry for
+            # all variants, we pick the entry whose dtype set covers the dtype
+            # embedded in method_name (e.g. bfloat16 -> bfloat16 entry,
+            # float16 -> float16 entry).
+            # ------------------------------------------------------------------
+            resolved_entry: Optional[TestEntry] = None
+            if all_entries_for_name:
+                resolved_entry = _select_entry_by_op_index(method_name)
+                if resolved_entry is None:
+                    resolved_entry = _select_entry_for_variant(
+                        all_entries_for_name,
+                        method_name,
+                        cls.GLOBAL_SUPPORTED_DTYPES,
+                    )
+
+            # Tags for this specific variant = tags from the resolved entry only
+            variant_tags: List[str] = (
+                list(resolved_entry.tags) if resolved_entry else []
+            )
+
             enabled, reason, is_xfail, is_strict = cls._should_run(
                 method_name=method_name,
                 base_test_name=name,
                 generic_cls_name=generic_cls.__name__
                 if generic_cls is not None
                 else "",
+                entry=resolved_entry,
             )
 
             if not enabled:
@@ -610,7 +752,7 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
 
             # if not enabled:
             #     @wraps(test)
-            #     def _skip(self, _reason=reason or "Skipped for Spyre"):
+            #     def _skip(self, _reason=reason or "Skipped by OOT config"):
             #         raise unittest.SkipTest(_reason)
 
             #     setattr(cls, method_name, _skip)
@@ -618,7 +760,7 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
 
             # Collect dynamic markers (op__, dtype__, module__) that the
             # patchers attached to this specific instantiated method, and
-            # union them with the YAML-declared tags so _XML_INJECT_PY
+            # union them with the variant-specific tags so _XML_INJECT_PY
             # only needs to handle one flat tag list per method.
             _DYNAMIC_PREFIXES = ("op__", "dtype__", "module__")
             existing_fn = cls.__dict__.get(method_name)
@@ -632,19 +774,19 @@ class TorchTestBase(PrivateUse1TestBase):  # type: ignore[name-defined]  # noqa:
                     }
                 )
 
-            seen = set(all_tags)
-            method_tags = list(all_tags)
+            seen = set(variant_tags)
+            method_tags = list(variant_tags)
             for t in dynamic_tags:
                 if t not in seen:
                     seen.add(t)
                     method_tags.append(t)
 
-            # apply all tags (YAML + dynamic) as marks
+            # apply all tags (variant-specific YAML + dynamic) as marks
             if method_tags:
                 existing_fn = cls.__dict__.get(method_name)
                 if existing_fn is not None:
                     # Store BEFORE marking so the attribute is on the base function
-                    existing_fn._spyre_method_tags = method_tags
+                    existing_fn._oot_method_tags = method_tags
                     marked_fn = existing_fn
                     for tag in method_tags:
                         marked_fn = pytest.mark.__getattr__(tag)(marked_fn)
