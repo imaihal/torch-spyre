@@ -888,11 +888,10 @@ def with_int64_fallback(fn, *args, convert_output=True):
     return output
 
 
+@register_spyre_lowering(
     torch.ops.aten.add.Tensor,
     type_promotion_kind=None,
 )
-
-@register_spyre_lowering(
 def lower_add(x, y):
     return with_int64_fallback(lowering.add, x, y)
 
