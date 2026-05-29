@@ -400,23 +400,16 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "ops_dict": POINTWISE_BINARY_OPS_INT64_DICT,
             "param_sets": {
                 "1d": (
-                    (cached_randn((256,), scale=100.0) * 100).to(torch.int64),
-                    (cached_randn((256,), differentiation=1, scale=100.0) * 100).to(
-                        torch.int64
-                    ),
+                    torch.randint(-100, 100, (256,), dtype=torch.int64),
+                    torch.randint(-100, 100, (256,), dtype=torch.int64),
                 ),
                 "2d": (
-                    (cached_randn((67, 256), scale=100.0) * 100).to(torch.int64),
-                    (cached_randn((67, 256), differentiation=1, scale=100.0) * 100).to(
-                        torch.int64
-                    ),
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
                 ),
                 "3d": (
-                    (cached_randn((67, 71, 256), scale=100.0) * 100).to(torch.int64),
-                    (
-                        cached_randn((67, 71, 256), differentiation=1, scale=100.0)
-                        * 100
-                    ).to(torch.int64),
+                    torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
                 ),
             },
         },
