@@ -1148,3 +1148,58 @@ def lower_minimum(x, y):
 )
 def lower_maximum(x, y):
     return with_int64_fallback(lowering.maximum, x, y)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.eq.Scalar,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+@register_spyre_lowering(
+    torch.ops.aten.eq.Tensor,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+def lower_eq(x, y):
+    """
+    Lower torch.eq with int64 support.
+
+    For int64 inputs, implements the conversion flow:
+    int64 → fp32 → eq → fp32 → bool
+
+    For non-int64 inputs:
+    - if either input is fp32, materialize eq as fp32 and convert to bool
+    - otherwise materialize eq directly as bool
+    """
+
+    def create_eq_pointwise(lhs, rhs, dtype):
+        result = Pointwise.create(
+            device=lhs.get_device(),
+            dtype=dtype,
+            inner_fn=lambda index: lowering.ops.eq(
+                lhs.make_loader()(index), rhs.make_loader()(index)
+            ),
+            ranges=lhs.get_size(),
+            origin_node=lhs.get_origin_node(),
+            traceback=lhs.get_traceback(),
+        )
+        result.realize()
+        return result
+
+    has_int64 = x.get_dtype() == torch.int64 or y.get_dtype() == torch.int64
+
+    if has_int64:
+        x_fp32 = to_dtype(x, torch.float32) if x.get_dtype() == torch.int64 else x
+        y_fp32 = to_dtype(y, torch.float32) if y.get_dtype() == torch.int64 else y
+        result_fp32 = create_eq_pointwise(x_fp32, y_fp32, torch.float32)
+        return to_dtype(result_fp32, torch.bool)
+
+    result_dtype = (
+        torch.float32
+        if x.get_dtype() == torch.float32 or y.get_dtype() == torch.float32
+        else torch.bool
+    )
+    result = create_eq_pointwise(x, y, result_dtype)
+    if result_dtype == torch.float32:
+        return to_dtype(result, torch.bool)
+    return result
