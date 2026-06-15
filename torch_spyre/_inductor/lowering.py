@@ -1162,20 +1162,50 @@ def lower_maximum(x, y):
 )
 def lower_eq(x, y):
     """
-    Lower torch.eq using Inductor's generic pointwise helper for all operand
-    combinations.
+    Lower torch.eq using Inductor's generic pointwise helper.
 
-    - tensor/tensor, tensor/scalar, and scalar/tensor are all handled through
-      make_pointwise
-    - int64 inputs are normalized to fp32 before comparison
-    - final semantic result is bool
+    Scalar-like operands are expanded with ``lower_full`` to match the tensor
+    operand shape before calling ``make_pointwise``.
     """
     fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
         lambda a, b: lowering.ops.eq(a, b)
     )
 
     def is_tensor_like(arg):
-        return hasattr(arg, "get_dtype")
+        return hasattr(arg, "get_dtype") and hasattr(arg, "get_size")
+
+    def is_zero_dim_tensor(arg):
+        return is_tensor_like(arg) and len(arg.get_size()) == 0
+
+    def extract_scalar_value(arg):
+        node = getattr(arg, "data", None)
+        node = getattr(node, "data", node)
+        if isinstance(node, SpyreConstantFallback) and len(node.constant_args) == 1:
+            return node.constant_args[0]
+        return None
+
+    def expand_scalar_like(arg, ref):
+        scalar_value = None
+        if isinstance(arg, bool):
+            scalar_value = arg
+        elif isinstance(arg, int):
+            scalar_value = float(arg)
+        elif isinstance(arg, float):
+            scalar_value = arg
+        elif is_zero_dim_tensor(arg):
+            scalar_value = extract_scalar_value(arg)
+
+        if scalar_value is None:
+            return arg
+
+        expanded = lower_full(
+            ref.get_size(),
+            scalar_value,
+            dtype=ref.get_dtype(),
+            device=ref.get_device(),
+        )
+        expanded.realize()
+        return expanded
 
     def normalize_eq_arg(arg):
         if is_tensor_like(arg):
@@ -1191,6 +1221,15 @@ def lower_eq(x, y):
             return arg, True
 
         return arg, False
+
+    if is_tensor_like(x) and not is_tensor_like(y):
+        y = expand_scalar_like(y, x)
+    elif is_tensor_like(y) and not is_tensor_like(x):
+        x = expand_scalar_like(x, y)
+    elif is_tensor_like(x) and is_zero_dim_tensor(y):
+        y = expand_scalar_like(y, x)
+    elif is_tensor_like(y) and is_zero_dim_tensor(x):
+        x = expand_scalar_like(x, y)
 
     x_norm, x_uses_fp32 = normalize_eq_arg(x)
     y_norm, y_uses_fp32 = normalize_eq_arg(y)
