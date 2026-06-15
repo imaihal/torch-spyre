@@ -1151,11 +1151,16 @@ def lower_maximum(x, y):
 
 
 def _lower_eq_tensor_impl(x, y):
+    # Use Inductor's generic pointwise helper for the actual elementwise compare.
+    # At this point both operands are expected to be tensor-like and shape-compatible.
     fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
         lambda a, b: lowering.ops.eq(a, b)
     )
 
     def normalize_eq_arg(arg):
+        # Spyre eq may compare in fp32, so int64 inputs are first converted to fp32.
+        # The boolean flag tracks whether the compare path used fp32 semantics and
+        # therefore needs an explicit cast back to bool after make_pointwise().
         if arg.get_dtype() == torch.int64:
             return to_dtype(arg, torch.float32), True
         return arg, arg.get_dtype() == torch.float32
@@ -1165,6 +1170,8 @@ def _lower_eq_tensor_impl(x, y):
 
     result = fn(x_norm, y_norm)
 
+    # Keep the semantic contract of aten.eq as bool even when the backend compare
+    # effectively runs through an fp32 path.
     if x_uses_fp32 or y_uses_fp32:
         return to_dtype(result, torch.bool)
 
@@ -1177,6 +1184,7 @@ def _lower_eq_tensor_impl(x, y):
     override_return_dtype=torch.bool,
 )
 def lower_eq_tensor(x, y):
+    # Pure tensor/tensor case: no scalar expansion is needed.
     return _lower_eq_tensor_impl(x, y)
 
 
@@ -1190,9 +1198,16 @@ def lower_eq_scalar(x, y):
         return hasattr(arg, "get_dtype") and hasattr(arg, "get_size")
 
     def is_zero_dim_tensor(arg):
+        # aten.eq.Scalar may still arrive with the "scalar" operand represented as
+        # a rank-0 TensorBox (for example a Spyre constant fallback), not a Python
+        # scalar. Detect that case so we can materialize it with lower_full().
         return is_tensor_like(arg) and len(arg.get_size()) == 0
 
     def extract_scalar_value(arg):
+        # Spyre constants are often wrapped as TensorBox -> StorageBox ->
+        # SpyreConstantFallback. If the scalar side is such a rank-0 constant,
+        # recover the literal fill value so lower_full() can expand it to the
+        # tensor operand's shape.
         node = getattr(arg, "data", None)
         node = getattr(node, "data", node)
         if isinstance(node, SpyreConstantFallback) and len(node.constant_args) == 1:
@@ -1200,6 +1215,9 @@ def lower_eq_scalar(x, y):
         return None
 
     def expand_scalar_like(arg, ref):
+        # Convert the scalar side of aten.eq.Scalar into a full tensor matching the
+        # tensor operand. This avoids make_pointwise() seeing a rank mismatch such
+        # as [1, 855] vs [].
         scalar_value = None
         if isinstance(arg, bool):
             scalar_value = arg
@@ -1222,6 +1240,8 @@ def lower_eq_scalar(x, y):
         expanded.realize()
         return expanded
 
+    # aten.eq.Scalar should have exactly one tensor side. Expand the scalar-like
+    # side to the tensor side's shape, then reuse the shared tensor/tensor path.
     if is_tensor_like(x):
         y = expand_scalar_like(y, x)
     elif is_tensor_like(y):
