@@ -1150,27 +1150,42 @@ def lower_maximum(x, y):
     return with_int64_fallback(lowering.maximum, x, y)
 
 
-@register_spyre_lowering(
-    torch.ops.aten.eq.Scalar,
-    type_promotion_kind=None,
-    override_return_dtype=torch.bool,
-)
+def _lower_eq_tensor_impl(x, y):
+    fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
+        lambda a, b: lowering.ops.eq(a, b)
+    )
+
+    def normalize_eq_arg(arg):
+        if arg.get_dtype() == torch.int64:
+            return to_dtype(arg, torch.float32), True
+        return arg, arg.get_dtype() == torch.float32
+
+    x_norm, x_uses_fp32 = normalize_eq_arg(x)
+    y_norm, y_uses_fp32 = normalize_eq_arg(y)
+
+    result = fn(x_norm, y_norm)
+
+    if x_uses_fp32 or y_uses_fp32:
+        return to_dtype(result, torch.bool)
+
+    return result
+
+
 @register_spyre_lowering(
     torch.ops.aten.eq.Tensor,
     type_promotion_kind=None,
     override_return_dtype=torch.bool,
 )
-def lower_eq(x, y):
-    """
-    Lower torch.eq using Inductor's generic pointwise helper.
+def lower_eq_tensor(x, y):
+    return _lower_eq_tensor_impl(x, y)
 
-    Scalar-like operands are expanded with ``lower_full`` to match the tensor
-    operand shape before calling ``make_pointwise``.
-    """
-    fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
-        lambda a, b: lowering.ops.eq(a, b)
-    )
 
+@register_spyre_lowering(
+    torch.ops.aten.eq.Scalar,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+def lower_eq_scalar(x, y):
     def is_tensor_like(arg):
         return hasattr(arg, "get_dtype") and hasattr(arg, "get_size")
 
@@ -1207,36 +1222,9 @@ def lower_eq(x, y):
         expanded.realize()
         return expanded
 
-    def normalize_eq_arg(arg):
-        if is_tensor_like(arg):
-            if arg.get_dtype() == torch.int64:
-                return to_dtype(arg, torch.float32), True
-            return arg, arg.get_dtype() == torch.float32
-
-        if isinstance(arg, bool):
-            return arg, False
-        if isinstance(arg, int):
-            return float(arg), True
-        if isinstance(arg, float):
-            return arg, True
-
-        return arg, False
-
-    if is_tensor_like(x) and not is_tensor_like(y):
+    if is_tensor_like(x):
         y = expand_scalar_like(y, x)
-    elif is_tensor_like(y) and not is_tensor_like(x):
-        x = expand_scalar_like(x, y)
-    elif is_tensor_like(x) and is_zero_dim_tensor(y):
-        y = expand_scalar_like(y, x)
-    elif is_tensor_like(y) and is_zero_dim_tensor(x):
+    elif is_tensor_like(y):
         x = expand_scalar_like(x, y)
 
-    x_norm, x_uses_fp32 = normalize_eq_arg(x)
-    y_norm, y_uses_fp32 = normalize_eq_arg(y)
-
-    result = fn(x_norm, y_norm)
-
-    if x_uses_fp32 or y_uses_fp32:
-        return to_dtype(result, torch.bool)
-
-    return result
+    return _lower_eq_tensor_impl(x, y)
