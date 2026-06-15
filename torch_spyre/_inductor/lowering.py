@@ -1162,44 +1162,42 @@ def lower_maximum(x, y):
 )
 def lower_eq(x, y):
     """
-    Lower torch.eq with int64 support.
+    Lower torch.eq using Inductor's generic pointwise helper for all operand
+    combinations.
 
-    For int64 inputs, implements the conversion flow:
-    int64 → fp32 → eq → fp32 → bool
-
-    For non-int64 inputs:
-    - if either input is fp32, materialize eq as fp32 and convert to bool
-    - otherwise materialize eq directly as bool
+    - tensor/tensor, tensor/scalar, and scalar/tensor are all handled through
+      make_pointwise
+    - int64 inputs are normalized to fp32 before comparison
+    - final semantic result is bool
     """
-
-    def create_eq_pointwise(lhs, rhs, dtype):
-        result = Pointwise.create(
-            device=lhs.get_device(),
-            dtype=dtype,
-            inner_fn=lambda index: lowering.ops.eq(
-                lhs.make_loader()(index), rhs.make_loader()(index)
-            ),
-            ranges=lhs.get_size(),
-            origin_node=lhs.get_origin_node(),
-            traceback=lhs.get_traceback(),
-        )
-        result.realize()
-        return result
-
-    has_int64 = x.get_dtype() == torch.int64 or y.get_dtype() == torch.int64
-
-    if has_int64:
-        x_fp32 = to_dtype(x, torch.float32) if x.get_dtype() == torch.int64 else x
-        y_fp32 = to_dtype(y, torch.float32) if y.get_dtype() == torch.int64 else y
-        result_fp32 = create_eq_pointwise(x_fp32, y_fp32, torch.float32)
-        return to_dtype(result_fp32, torch.bool)
-
-    result_dtype = (
-        torch.float32
-        if x.get_dtype() == torch.float32 or y.get_dtype() == torch.float32
-        else torch.bool
+    fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
+        lambda a, b: lowering.ops.eq(a, b)
     )
-    result = create_eq_pointwise(x, y, result_dtype)
-    if result_dtype == torch.float32:
+
+    def is_tensor_like(arg):
+        return hasattr(arg, "get_dtype")
+
+    def normalize_eq_arg(arg):
+        if is_tensor_like(arg):
+            if arg.get_dtype() == torch.int64:
+                return to_dtype(arg, torch.float32), True
+            return arg, arg.get_dtype() == torch.float32
+
+        if isinstance(arg, bool):
+            return arg, False
+        if isinstance(arg, int):
+            return float(arg), True
+        if isinstance(arg, float):
+            return arg, True
+
+        return arg, False
+
+    x_norm, x_uses_fp32 = normalize_eq_arg(x)
+    y_norm, y_uses_fp32 = normalize_eq_arg(y)
+
+    result = fn(x_norm, y_norm)
+
+    if x_uses_fp32 or y_uses_fp32:
         return to_dtype(result, torch.bool)
+
     return result
