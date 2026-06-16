@@ -1135,6 +1135,69 @@ def lower_sub(x, y, *, alpha=1):
 
 
 @register_spyre_lowering(
+    torch.ops.aten.div.Tensor,
+    type_promotion_kind=None,
+)
+def lower_div(x, y, *, rounding_mode=None):
+    """
+    Lower division operation with int64 support.
+
+    For int64 inputs, converts to fp32, performs division, and returns fp32 result.
+    This matches PyTorch's behavior where integer division returns float by default.
+
+    Args:
+        x: dividend tensor
+        y: divisor tensor
+        rounding_mode: Optional rounding mode ('trunc', 'floor', or None for true division)
+    """
+    if rounding_mode is None:
+        # True division - convert int64 to fp32 but don't convert back
+        return with_int64_fallback(lowering.div, x, y, convert_output=False)
+    elif rounding_mode == "trunc":
+        # Truncated division - for int64, convert to fp32, divide, trunc, convert back
+        result = with_int64_fallback(lowering.div, x, y, convert_output=True)
+        # result.realize()
+        # result = lowering.trunc(result)
+        if x.get_dtype() == torch.int64 or y.get_dtype() == torch.int64:
+            result = to_dtype(result, torch.int64)
+        return result
+    elif rounding_mode == "floor":
+        # Floor division - for int64, convert to fp32, divide, floor, convert back
+        result = with_int64_fallback(lowering.div, x, y, convert_output=False)
+        result.realize()
+        result = lowering.floor(result)
+        if x.get_dtype() == torch.int64 or y.get_dtype() == torch.int64:
+            result = to_dtype(result, torch.int64)
+        return result
+    else:
+        raise ValueError(f"Unsupported rounding_mode: {rounding_mode}")
+
+
+@register_spyre_lowering(
+    torch.ops.aten.div.Tensor_mode,
+    type_promotion_kind=None,
+)
+def lower_div_tensor_mode(x, y, *, rounding_mode):
+    """
+    Lower division operation with explicit rounding_mode parameter.
+    This is called when torch.div is used with rounding_mode argument.
+    """
+    return lower_div(x, y, rounding_mode=rounding_mode)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.true_divide.Tensor,
+    type_promotion_kind=None,
+)
+def lower_true_divide(x, y):
+    """
+    Lower true_divide operation (alias for div with no rounding).
+    Always returns float result, even for integer inputs.
+    """
+    return with_int64_fallback(lowering.div, x, y, convert_output=False)
+
+
+@register_spyre_lowering(
     torch.ops.aten.minimum.default,
     type_promotion_kind=None,
 )
