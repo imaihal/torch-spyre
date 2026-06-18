@@ -380,6 +380,7 @@ def convert_constant_with_graph_node(graph: torch.fx.Graph) -> None:
         torch.ops.aten.mul.Tensor,
         torch.ops.aten.true_divide.Tensor,
         torch.ops.aten.div.Tensor,
+        torch.ops.aten.div.Tensor_mode,
         torch.ops.aten.eq.Tensor,
         torch.ops.aten.eq.Scalar,
     ]
