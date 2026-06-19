@@ -4116,53 +4116,50 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d_dim3": (3, cached_randn((2, 4, 8, 64))),
             },
         },
-    }
-
-    PARAMS = make_param_dict(
-        "test_div_rounding_mode_floor_cpu",
-        "test_div_rounding_mode_trunc_cpu",
-        {
-            "fp16_2d": (
-                cached_randn((67, 256), scale=10.0, dtype=torch.float16),
-                cached_randn((67, 256), scale=2.0, dtype=torch.float16) + 0.5,
-            ),
-            "fp32_2d": (
-                cached_randn((67, 256), scale=10.0, dtype=torch.float32),
-                cached_randn((67, 256), scale=2.0, dtype=torch.float32)
-                + 0.5,  # Avoid division by zero
-            ),
-            "int64_2d": (
-                torch.randint(-100, 100, (67, 256), dtype=torch.int64),
-                torch.randint(
-                    1, 10, (67, 256), dtype=torch.int64
-                ),  # Positive divisors only
-            ),
-            "negative_fp16": (
-                torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
-                torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float16),
-            ),
-            "negative_fp32": (
-                torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
-                torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float32),
-            ),
-            "negative_int64": (
-                torch.tensor([-10, -21, 30, -7], dtype=torch.int64),
-                torch.tensor([3, 4, 5, 2], dtype=torch.int64),
-            ),
-            "fp16_tensor_scalar": (
-                cached_randn((67, 256), scale=10.0, dtype=torch.float16),
-                3.0,
-            ),
-            "fp32_tensor_scalar": (
-                cached_randn((67, 256), scale=10.0, dtype=torch.float32),
-                3.0,
-            ),
-            "int64_tensor_scalar": (
-                torch.randint(-100, 100, (67, 256), dtype=torch.int64),
-                5,
-            ),
+        ("test_div_rounding_mode_floor_cpu", "test_div_rounding_mode_trunc_cpu"): {
+            "param_sets": {
+                "fp16_2d": (
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float16),
+                    cached_randn((67, 256), scale=2.0, dtype=torch.float16) + 0.5,
+                ),
+                "fp32_2d": (
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float32),
+                    cached_randn((67, 256), scale=2.0, dtype=torch.float32)
+                    + 0.5,  # Avoid division by zero
+                ),
+                "int64_2d": (
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    torch.randint(
+                        1, 10, (67, 256), dtype=torch.int64
+                    ),  # Positive divisors only
+                ),
+                "negative_fp16": (
+                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
+                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float16),
+                ),
+                "negative_fp32": (
+                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
+                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float32),
+                ),
+                "negative_int64": (
+                    torch.tensor([-10, -21, 30, -7], dtype=torch.int64),
+                    torch.tensor([3, 4, 5, 2], dtype=torch.int64),
+                ),
+                "fp16_tensor_scalar": (
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float16),
+                    3.0,
+                ),
+                "fp32_tensor_scalar": (
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float32),
+                    3.0,
+                ),
+                "int64_tensor_scalar": (
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    5,
+                ),
+            },
         },
-    )
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
