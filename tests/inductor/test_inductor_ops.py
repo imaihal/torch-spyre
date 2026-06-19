@@ -57,14 +57,6 @@ POINTWISE_BINARY_OPS_DICT = {
     "maximum": torch.maximum,
 }
 
-POINTWISE_BINARY_OPS_INT64_DICT = {
-    "add": torch.add,
-    "mul": torch.mul,
-    "sub": torch.sub,
-    "minimum": torch.minimum,
-    "maximum": torch.maximum,
-}
-
 CORE_REDUCTION_OPS_DICT = {
     "sum": torch.sum,
     "mean": torch.mean,
@@ -443,7 +435,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "test_pointwise_binary_op_int64",
             "test_binary_op",
         ): {
-            "ops_dict": POINTWISE_BINARY_OPS_INT64_DICT,
+            "ops_dict": POINTWISE_BINARY_OPS_DICT,
             "param_sets": {
                 "1d": (
                     torch.randint(-100, 100, (256,), dtype=torch.int64),
@@ -2474,6 +2466,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "2d": (cached_randn((512, 1024), dtype=torch.float16), 1.0),
                 "3d": (cached_randn((8, 64, 1024), dtype=torch.float16), 1.5),
                 "4d": (cached_randn((2, 4, 64, 1024), dtype=torch.float16), 2.4),
+                "1d_fp32": (cached_randn((1024,), dtype=torch.float32), 3.0),
+                "2d_fp32": (cached_randn((512, 1024), dtype=torch.float32), 1.0),
+                "3d_fp32": (cached_randn((8, 64, 1024), dtype=torch.float32), 1.5),
+                "4d_fp32": (cached_randn((2, 4, 64, 1024), dtype=torch.float32), 2.4),
             },
         },
         ("test_linear", "test_linear_fn"): {
@@ -4121,6 +4117,52 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
         },
     }
+
+    PARAMS = make_param_dict(
+        "test_div_rounding_mode_floor_cpu",
+        "test_div_rounding_mode_trunc_cpu",
+        {
+            "fp16_2d": (
+                cached_randn((67, 256), scale=10.0, dtype=torch.float16),
+                cached_randn((67, 256), scale=2.0, dtype=torch.float16) + 0.5,
+            ),
+            "fp32_2d": (
+                cached_randn((67, 256), scale=10.0, dtype=torch.float32),
+                cached_randn((67, 256), scale=2.0, dtype=torch.float32)
+                + 0.5,  # Avoid division by zero
+            ),
+            "int64_2d": (
+                torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                torch.randint(
+                    1, 10, (67, 256), dtype=torch.int64
+                ),  # Positive divisors only
+            ),
+            "negative_fp16": (
+                torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
+                torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float16),
+            ),
+            "negative_fp32": (
+                torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
+                torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float32),
+            ),
+            "negative_int64": (
+                torch.tensor([-10, -21, 30, -7], dtype=torch.int64),
+                torch.tensor([3, 4, 5, 2], dtype=torch.int64),
+            ),
+            "fp16_tensor_scalar": (
+                cached_randn((67, 256), scale=10.0, dtype=torch.float16),
+                3.0,
+            ),
+            "fp32_tensor_scalar": (
+                cached_randn((67, 256), scale=10.0, dtype=torch.float32),
+                3.0,
+            ),
+            "int64_tensor_scalar": (
+                torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                5,
+            ),
+        },
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -5820,6 +5862,22 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             match="Boolean value of Tensor with more than one value is ambiguous",
         ):
             compiled(x_multi.to("spyre"))
+
+    def test_div_rounding_mode_floor_cpu(self, x, y):
+        """Test torch.div with rounding_mode='floor'."""
+
+        def fn(a, b):
+            return torch.div(a, b, rounding_mode="floor")
+
+        self.compare_with_cpu(fn, x, y, run_eager=True)
+
+    def test_div_rounding_mode_trunc_cpu(self, x, y):
+        """Test torch.div with rounding_mode='trunc'."""
+
+        def fn(a, b):
+            return torch.div(a, b, rounding_mode="trunc")
+
+        self.compare_with_cpu(fn, x, y, run_eager=True)
 
 
 if __name__ == "__main__":
