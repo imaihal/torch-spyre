@@ -80,4 +80,6 @@ test_suite_config:
             - TestOps::test_single_dim_reduction_invalid_dims_spyre.*
             # restickify add on padded dim tests
             - TestOps::test_restickify_add_transpose.*
+            - TestOps::test_div_rounding_mode_floor_cpu
+            - TestOps::test_div_rounding_mode_trunc_cpu
           mode: mandatory_success
