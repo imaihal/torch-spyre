@@ -4116,44 +4116,95 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d_dim3": (3, cached_randn((2, 4, 8, 64))),
             },
         },
-        ("test_div_rounding_mode_floor_cpu", "test_div_rounding_mode_trunc_cpu"): {
+        ("test_div_rounding_mode", "test_div_rounding_mode_cpu"): {
             "param_sets": {
-                "fp16_2d": (
+                "floor_fp16_2d": (
+                    "floor",
                     cached_randn((67, 256), scale=10.0, dtype=torch.float16),
                     cached_randn((67, 256), scale=2.0, dtype=torch.float16) + 0.5,
                 ),
-                "fp32_2d": (
+                "floor_fp32_2d": (
+                    "floor",
                     cached_randn((67, 256), scale=10.0, dtype=torch.float32),
-                    cached_randn((67, 256), scale=2.0, dtype=torch.float32)
-                    + 0.5,  # Avoid division by zero
+                    cached_randn((67, 256), scale=2.0, dtype=torch.float32) + 0.5,
                 ),
-                "int64_2d": (
+                "floor_int64_2d": (
+                    "floor",
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
-                    torch.randint(
-                        1, 10, (67, 256), dtype=torch.int64
-                    ),  # Positive divisors only
+                    torch.randint(1, 10, (67, 256), dtype=torch.int64),
                 ),
-                "negative_fp16": (
+                "floor_negative_fp16": (
+                    "floor",
                     torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
                     torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float16),
                 ),
-                "negative_fp32": (
+                "floor_negative_fp32": (
+                    "floor",
                     torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
                     torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float32),
                 ),
-                "negative_int64": (
+                "floor_negative_int64": (
+                    "floor",
                     torch.tensor([-10, -21, 30, -7], dtype=torch.int64),
                     torch.tensor([3, 4, 5, 2], dtype=torch.int64),
                 ),
-                "fp16_tensor_scalar": (
+                "floor_fp16_tensor_scalar": (
+                    "floor",
                     cached_randn((67, 256), scale=10.0, dtype=torch.float16),
                     3.0,
                 ),
-                "fp32_tensor_scalar": (
+                "floor_fp32_tensor_scalar": (
+                    "floor",
                     cached_randn((67, 256), scale=10.0, dtype=torch.float32),
                     3.0,
                 ),
-                "int64_tensor_scalar": (
+                "floor_int64_tensor_scalar": (
+                    "floor",
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    5,
+                ),
+                "trunc_fp16_2d": (
+                    "trunc",
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float16),
+                    cached_randn((67, 256), scale=2.0, dtype=torch.float16) + 0.5,
+                ),
+                "trunc_fp32_2d": (
+                    "trunc",
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float32),
+                    cached_randn((67, 256), scale=2.0, dtype=torch.float32) + 0.5,
+                ),
+                "trunc_int64_2d": (
+                    "trunc",
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    torch.randint(1, 10, (67, 256), dtype=torch.int64),
+                ),
+                "trunc_negative_fp16": (
+                    "trunc",
+                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
+                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float16),
+                ),
+                "trunc_negative_fp32": (
+                    "trunc",
+                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
+                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float32),
+                ),
+                "trunc_negative_int64": (
+                    "trunc",
+                    torch.tensor([-10, -21, 30, -7], dtype=torch.int64),
+                    torch.tensor([3, 4, 5, 2], dtype=torch.int64),
+                ),
+                "trunc_fp16_tensor_scalar": (
+                    "trunc",
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float16),
+                    3.0,
+                ),
+                "trunc_fp32_tensor_scalar": (
+                    "trunc",
+                    cached_randn((67, 256), scale=10.0, dtype=torch.float32),
+                    3.0,
+                ),
+                "trunc_int64_tensor_scalar": (
+                    "trunc",
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
                     5,
                 ),
@@ -5860,19 +5911,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ):
             compiled(x_multi.to("spyre"))
 
-    def test_div_rounding_mode_floor_cpu(self, x, y):
-        """Test torch.div with rounding_mode='floor'."""
+    def test_div_rounding_mode_cpu(self, rounding_mode, x, y):
+        """Test torch.div with different rounding modes."""
 
         def fn(a, b):
-            return torch.div(a, b, rounding_mode="floor")
-
-        self.compare_with_cpu(fn, x, y, run_eager=True)
-
-    def test_div_rounding_mode_trunc_cpu(self, x, y):
-        """Test torch.div with rounding_mode='trunc'."""
-
-        def fn(a, b):
-            return torch.div(a, b, rounding_mode="trunc")
+            return torch.div(a, b, rounding_mode=rounding_mode)
 
         self.compare_with_cpu(fn, x, y, run_eager=True)
 
