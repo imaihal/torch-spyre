@@ -1177,18 +1177,26 @@ def _lower_eq_tensor_impl(x, y):
         # Spyre eq may compare in fp32, so int64 inputs are first converted to fp32.
         # The boolean flag tracks whether the compare path used fp32 semantics and
         # therefore needs an explicit cast back to bool after make_pointwise().
-        if arg.get_dtype() == torch.int64:
-            return to_dtype(arg, torch.float32), True
-        return arg, arg.get_dtype() == torch.float32
+        if hasattr(arg, "get_dtype"):
+            if arg.get_dtype() == torch.int64:
+                return to_dtype(arg, torch.float32), True
+            elif arg.get_dtype() == torch.float:
+                return arg, True
+        else:
+            if isinstance(arg, int):
+                return float(arg), True
+            elif isinstance(arg, float):
+                return arg, True
+        return arg, False
 
-    x_norm, x_uses_fp32 = normalize_eq_arg(x)
-    y_norm, y_uses_fp32 = normalize_eq_arg(y)
+    x_norm, x_uses_fp = normalize_eq_arg(x)
+    y_norm, y_uses_fp = normalize_eq_arg(y)
 
     result = fn(x_norm, y_norm)
 
     # Keep the semantic contract of aten.eq as bool even when the backend compare
     # effectively runs through an fp32 path.
-    if x_uses_fp32 or y_uses_fp32:
+    if x_uses_fp or y_uses_fp:
         return to_dtype(result, torch.bool)
 
     return result
@@ -1258,9 +1266,10 @@ def lower_eq_scalar(x, y):
 
     # aten.eq.Scalar should have exactly one tensor side. Expand the scalar-like
     # side to the tensor side's shape, then reuse the shared tensor/tensor path.
+    """
     if is_tensor_like(x):
         y = expand_scalar_like(y, x)
     elif is_tensor_like(y):
         x = expand_scalar_like(x, y)
-
+    """
     return _lower_eq_tensor_impl(x, y)
