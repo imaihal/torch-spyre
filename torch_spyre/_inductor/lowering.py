@@ -1156,29 +1156,44 @@ def lower_sub(x, y, *, alpha=1):
 )
 def lower_div(x, y, *, rounding_mode=None):
     """
-    Lower division operation with int64 support.
+    Lower torch.div operation with support for different rounding modes.
 
-    For int64 inputs, converts to fp32, performs division, and returns fp32 result.
-    This matches PyTorch's behavior where integer division returns float by default.
+    For int64 inputs, converts to fp32 for computation since Spyre doesn't support
+    int64 arithmetic natively. The output type depends on the rounding_mode:
+    - None (true division): Returns fp32 (matches PyTorch behavior)
+    - 'trunc': Returns int64 (rounds toward zero)
+    - 'floor': Returns int64 (rounds toward negative infinity)
+
+    For non-int64 inputs (fp16/fp32), performs division directly without conversion.
 
     Args:
-        x: dividend tensor
-        y: divisor tensor
-        rounding_mode: Optional rounding mode ('trunc', 'floor', or None for true division)
+        x: Dividend tensor or scalar
+        y: Divisor tensor or scalar
+        rounding_mode: Optional rounding mode:
+            - None: True division (default, returns float for int inputs)
+            - 'trunc': Truncated division (rounds toward zero)
+            - 'floor': Floor division (rounds toward negative infinity)
+
+    Returns:
+        Result tensor with appropriate dtype based on input types and rounding_mode
     """
     if rounding_mode is None:
-        # True division - convert int64 to fp32 but don't convert back
+        # True division: int64 -> fp32 division -> fp32 output
+        # This matches PyTorch's behavior where int / int returns float
         return with_int64_fallback(lowering.div, x, y, convert_output=False)
     elif rounding_mode == "trunc":
-        # Truncated division - for int64, convert to fp32, divide, trunc, convert back
-        result = with_int64_fallback(lowering.div, x, y, convert_output=True)
-        # result.realize()
-        # result = lowering.trunc(result)
+        # Truncated division (rounds toward zero): int64 -> fp32 -> divide -> trunc -> int64
+        # Only supported for int64 inputs for now
         if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
-            result = to_dtype(result, torch.int64)
-        return result
+            return with_int64_fallback(lowering.div, x, y, convert_output=True)
+        else:
+            raise ValueError(
+                f"trunc rounding_mode only supports int64 tensors, but got {x.get_dtype()}"
+            )
     elif rounding_mode == "floor":
-        # Floor division - for int64, convert to fp32, divide, floor, convert back
+        # Floor division (rounds toward -inf): int64 -> fp32 -> divide -> floor -> int64
+        # For int64: convert to fp32, divide, floor, convert back to int64
+        # For fp16/fp32: divide and floor, keep original dtype
         result = with_int64_fallback(lowering.div, x, y, convert_output=False)
         result.realize()
         result = lowering.floor(result)
