@@ -1174,7 +1174,7 @@ def lower_div(x, y, *, rounding_mode=None):
         result = with_int64_fallback(lowering.div, x, y, convert_output=True)
         # result.realize()
         # result = lowering.trunc(result)
-        if x.get_dtype() == torch.int64 or y.get_dtype() == torch.int64:
+        if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
             result = to_dtype(result, torch.int64)
         return result
     elif rounding_mode == "floor":
@@ -1182,7 +1182,7 @@ def lower_div(x, y, *, rounding_mode=None):
         result = with_int64_fallback(lowering.div, x, y, convert_output=False)
         result.realize()
         result = lowering.floor(result)
-        if x.get_dtype() == torch.int64 or y.get_dtype() == torch.int64:
+        if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
             result = to_dtype(result, torch.int64)
         return result
     else:
