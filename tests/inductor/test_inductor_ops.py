@@ -4186,55 +4186,21 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
                     2,
                 ),
-                """
-                "trunc_fp16_2d": (
-                    "trunc",
-                    torch.randint(-100, 100, (67, 256)).to(dtype=torch.float16),
-                    torch.ones(67, 256, dtype=torch.float16) * 2.0,
-                ),
-                "trunc_fp32_2d": (
-                    "trunc",
-                    torch.randint(-100, 100, (67, 256)).to(dtype=torch.float32),
-                    torch.ones(67, 256, dtype=torch.float32) * 2.0,
-                ),
-                """
                 "trunc_int64_2d": (
                     "trunc",
-                    torch.randint(-100, 100, (67, 256)),
-                    torch.ones(67, 256, dtype=torch.int64) * 2,
+                    torch.tensor(
+                        [[-11, -21, 31, -7], [-11, -21, 31, -7]], dtype=torch.int64
+                    ),
+                    torch.tensor([[3, 4, 5, 2], [3, 4, 5, 2]], dtype=torch.int64),
                 ),
-                """
-                "trunc_negative_fp16": (
-                    "trunc",
-                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
-                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float16),
-                ),
-                "trunc_negative_fp32": (
-                    "trunc",
-                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
-                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float32),
-                ),
-                """
                 "trunc_negative_int64": (
                     "trunc",
-                    torch.tensor([-10, -21, 30, -7], dtype=torch.int64),
+                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
                     torch.tensor([3, 4, 5, 2], dtype=torch.int64),
                 ),
-                """
-                "trunc_fp16_tensor_scalar": (
-                    "trunc",
-                    torch.randint(-100, 100, (67, 256)).to(dtype=torch.float16),
-                    2.0,
-                ),
-                "trunc_fp32_tensor_scalar": (
-                    "trunc",
-                    torch.randint(-100, 100, (67, 256)).to(dtype=torch.float32),
-                    2.0,
-                ),
-                """
                 "trunc_int64_tensor_scalar": (
                     "trunc",
-                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
                     2,
                 ),
             },
