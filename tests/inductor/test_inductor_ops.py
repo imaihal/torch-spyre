@@ -1338,6 +1338,44 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        ("test_eq_fp32", "test_binary_op_cpu"): {
+            "ops_dict": {
+                "eq": torch.eq,
+            },
+            "param_sets": {
+                "1d_fp32": (
+                    cached_randn((256,), dtype=torch.float32),
+                    cached_randn((256,), differentiation=1, dtype=torch.float32),
+                ),
+                "2d_fp32": (
+                    cached_randn((67, 256), dtype=torch.float32),
+                    cached_randn((67, 256), differentiation=1, dtype=torch.float32),
+                ),
+                "3d_fp32": (
+                    cached_randn((67, 71, 256), dtype=torch.float32),
+                    cached_randn((67, 71, 256), differentiation=1, dtype=torch.float32),
+                ),
+            },
+        },
+        ("test_eq_int64", "test_binary_op_cpu"): {
+            "ops_dict": {
+                "eq": torch.eq,
+            },
+            "param_sets": {
+                "1d_int64": (
+                    torch.randint(-100, 100, (256,), dtype=torch.int64),
+                    torch.randint(-100, 100, (256,), dtype=torch.int64),
+                ),
+                "2d_int64": (
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                ),
+                "3d_int64": (
+                    torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
+                ),
+            },
+        },
         ("test_cmp_scalar_int64", "test_cmp_scalar_int64_cpu"): {
             "ops_dict": {
                 "ne": torch.ne,
@@ -3838,6 +3876,50 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        ("test_eq_scalar_fp32", "test_scalar_comparison_base"): {
+            "param_sets": {
+                "int_42_fp32": (
+                    42,
+                    torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], dtype=torch.float32),
+                ),
+                "int_10_fp32": (
+                    10,
+                    torch.tensor([1.0, 10.0, 5.0, 10.0, 3.0], dtype=torch.float32),
+                ),
+                "float_3_5_fp32": (
+                    3.5,
+                    torch.tensor([1.0, 3.5, 2.5, 3.1, 5.0], dtype=torch.float32),
+                ),
+                "negative_5_fp32": (
+                    -5,
+                    torch.tensor([-5, 0.0, 5.0, -5.0, 10.0], dtype=torch.float32),
+                ),
+                "zero_fp32": (
+                    0,
+                    torch.tensor([0.0, 1.0, -1.0, 0.0, 5.0], dtype=torch.float32),
+                ),
+            },
+        },
+        ("test_eq_scalar_int64", "test_scalar_comparison_base"): {
+            "param_sets": {
+                "int_42_int64": (
+                    42,
+                    torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64),
+                ),
+                "int_10_int64": (
+                    10,
+                    torch.tensor([1, 10, 5, 10, 3], dtype=torch.int64),
+                ),
+                "negative_5_int64": (
+                    -5,
+                    torch.tensor([-5, 0, 5, -5, 10], dtype=torch.int64),
+                ),
+                "zero_int64": (
+                    0,
+                    torch.tensor([0, 1, -1, 0, 5], dtype=torch.int64),
+                ),
+            },
+        },
         ("test_where_default", "test_where_eager_default_fallback"): {
             "ops_dict": {"where": torch.where},
             "param_sets": {
@@ -4257,6 +4339,8 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         self.compare_with_cpu(fn, a, b)
 
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
     def test_binary_op_cpu(self, op, x, y):
         # Eager mode support varies by op:
         # - torch.eq, torch.ge, torch.gt, torch.lt: work eagerly

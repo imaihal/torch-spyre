@@ -1199,7 +1199,7 @@ def _lower_eq_tensor_impl(x, y):
     if x_uses_fp or y_uses_fp:
         return to_dtype(result, torch.bool)
 
-    return result
+    return to_dtype(result, torch.bool)
 
 
 @register_spyre_lowering(
