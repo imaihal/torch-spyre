@@ -1166,7 +1166,17 @@ def lower_maximum(x, y):
     return with_int64_fallback(lowering.maximum, x, y)
 
 
-def _lower_eq_tensor_impl(x, y):
+@register_spyre_lowering(
+    torch.ops.aten.eq.Scalar,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+@register_spyre_lowering(
+    torch.ops.aten.eq.Tensor,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+def _lower_eq(x, y):
     # Use Inductor's generic pointwise helper for the actual elementwise compare.
     # At this point both operands are expected to be tensor-like and shape-compatible.
     fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
@@ -1200,76 +1210,3 @@ def _lower_eq_tensor_impl(x, y):
         return to_dtype(result, torch.bool)
 
     return to_dtype(result, torch.bool)
-
-
-@register_spyre_lowering(
-    torch.ops.aten.eq.Tensor,
-    type_promotion_kind=None,
-    override_return_dtype=torch.bool,
-)
-def lower_eq_tensor(x, y):
-    # Pure tensor/tensor case: no scalar expansion is needed.
-    return _lower_eq_tensor_impl(x, y)
-
-
-@register_spyre_lowering(
-    torch.ops.aten.eq.Scalar,
-    type_promotion_kind=None,
-    override_return_dtype=torch.bool,
-)
-def lower_eq_scalar(x, y):
-    def is_tensor_like(arg):
-        return hasattr(arg, "get_dtype") and hasattr(arg, "get_size")
-
-    def is_zero_dim_tensor(arg):
-        # aten.eq.Scalar may still arrive with the "scalar" operand represented as
-        # a rank-0 TensorBox (for example a Spyre constant fallback), not a Python
-        # scalar. Detect that case so we can materialize it with lower_full().
-        return is_tensor_like(arg) and len(arg.get_size()) == 0
-
-    def extract_scalar_value(arg):
-        # Spyre constants are often wrapped as TensorBox -> StorageBox ->
-        # SpyreConstantFallback. If the scalar side is such a rank-0 constant,
-        # recover the literal fill value so lower_full() can expand it to the
-        # tensor operand's shape.
-        node = getattr(arg, "data", None)
-        node = getattr(node, "data", node)
-        if isinstance(node, SpyreConstantFallback) and len(node.constant_args) == 1:
-            return node.constant_args[0]
-        return None
-
-    def expand_scalar_like(arg, ref):
-        # Convert the scalar side of aten.eq.Scalar into a full tensor matching the
-        # tensor operand. This avoids make_pointwise() seeing a rank mismatch such
-        # as [1, 855] vs [].
-        scalar_value = None
-        if isinstance(arg, bool):
-            scalar_value = arg
-        elif isinstance(arg, int):
-            scalar_value = float(arg)
-        elif isinstance(arg, float):
-            scalar_value = arg
-        elif is_zero_dim_tensor(arg):
-            scalar_value = extract_scalar_value(arg)
-
-        if scalar_value is None:
-            return arg
-
-        expanded = lower_full(
-            ref.get_size(),
-            scalar_value,
-            dtype=ref.get_dtype(),
-            device=ref.get_device(),
-        )
-        expanded.realize()
-        return expanded
-
-    # aten.eq.Scalar should have exactly one tensor side. Expand the scalar-like
-    # side to the tensor side's shape, then reuse the shared tensor/tensor path.
-    """
-    if is_tensor_like(x):
-        y = expand_scalar_like(y, x)
-    elif is_tensor_like(y):
-        x = expand_scalar_like(x, y)
-    """
-    return _lower_eq_tensor_impl(x, y)
