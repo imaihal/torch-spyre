@@ -1227,7 +1227,7 @@ def _lower_eq(x, y):
     maintain PyTorch's aten.eq semantic contract.
     """
     # Create pointwise comparison operation
-    fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
+    fn: Callable[..., Any | ir.TensorBox] = lowering.make_pointwise(
         lambda a, b: lowering.ops.eq(a, b)
     )
 
