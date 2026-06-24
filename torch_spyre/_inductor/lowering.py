@@ -1219,36 +1219,41 @@ def lower_qfp8ch(x):
     override_return_dtype=torch.bool,
 )
 def _lower_eq(x, y):
-    # Use Inductor's generic pointwise helper for the actual elementwise compare.
-    # At this point both operands are expected to be tensor-like and shape-compatible.
+    """
+    Lower torch.eq operation for Spyre backend.
+
+    Spyre performs equality comparisons in fp32, so int64 and fp32 inputs are
+    normalized to fp32 before comparison. The result is always cast to bool to
+    maintain PyTorch's aten.eq semantic contract.
+    """
+    # Create pointwise comparison operation
     fn: Callable[..., Any | TensorBox] = lowering.make_pointwise(
         lambda a, b: lowering.ops.eq(a, b)
     )
 
     def normalize_eq_arg(arg):
-        # Spyre eq may compare in fp32, so int64 inputs are first converted to fp32.
-        # The boolean flag tracks whether the compare path used fp32 semantics and
-        # therefore needs an explicit cast back to bool after make_pointwise().
+        """
+        Normalize argument for fp32 comparison path.
+
+        Converts int64 tensors and int/float scalars to fp32 for comparison.
+        Returns the normalized argument.
+        """
+        # Handle tensor arguments
         if hasattr(arg, "get_dtype"):
-            if arg.get_dtype() == torch.int64:
-                return to_dtype(arg, torch.float32), True
-            elif arg.get_dtype() == torch.float:
-                return arg, True
-        else:
-            if isinstance(arg, int):
-                return float(arg), True
-            elif isinstance(arg, float):
-                return arg, True
-        return arg, False
+            dtype = arg.get_dtype()
+            if dtype == torch.int64:
+                # Convert int64 tensors to fp32 for comparison
+                return to_dtype(arg, torch.float32)
 
-    x_norm, x_uses_fp = normalize_eq_arg(x)
-    y_norm, y_uses_fp = normalize_eq_arg(y)
+        # Other types (e.g., fp32 tensors, float scalars, fp16) pass through unchanged
+        return arg
 
+    # Normalize both operands
+    x_norm = normalize_eq_arg(x)
+    y_norm = normalize_eq_arg(y)
+
+    # Perform comparison
     result = fn(x_norm, y_norm)
 
-    # Keep the semantic contract of aten.eq as bool even when the backend compare
-    # effectively runs through an fp32 path.
-    if x_uses_fp or y_uses_fp:
-        return to_dtype(result, torch.bool)
-
+    # Always cast result to bool to match aten.eq semantics
     return to_dtype(result, torch.bool)
