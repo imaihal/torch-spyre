@@ -705,29 +705,30 @@ def lower_sum_default(x, *, dtype=None):
     else:
         target_dtype = dtype if dtype is not None else input_dtype
 
-    # Handle bool input with int64 output via fp32 conversion
+    # Handle bool input with int64 output via fp conversion
     if input_dtype == torch.bool and target_dtype == torch.int64:
-        # Step 1: Convert bool to fp32
-        x_fp32 = to_dtype(x, torch.float32)
-        x_fp32.realize()
+        comp_dtype = torch.float16  # torch.float32
+        # Step 1: Convert bool to fp
+        x_fp = to_dtype(x, comp_dtype)
+        x_fp.realize()
 
         # Step 2: Sum all dimensions in fp32
         axis = list(range(len(x.get_size())))
         kwargs = lowering._make_reduction_inner(
-            x_fp32,
+            x_fp,
             axis=axis,
             keepdims=False,
-            dtype=torch.float32,
-            override_return_dtype=torch.float32,
+            dtype=comp_dtype,
+            override_return_dtype=comp_dtype,
         )
 
-        result_fp32 = SpyreReduction.create(
-            reduction_type="sum", input_node=x_fp32, op_info={}, **kwargs
+        result_fp = SpyreReduction.create(
+            reduction_type="sum", input_node=x_fp, op_info={}, **kwargs
         )
-        result_fp32.realize()
+        result_fp.realize()
 
         # Step 3: Convert result back to int64
-        result_int64 = to_dtype(result_fp32, torch.int64)
+        result_int64 = to_dtype(result_fp, torch.int64)
         return result_int64
 
     # For all other cases, use PyTorch's default sum implementation
