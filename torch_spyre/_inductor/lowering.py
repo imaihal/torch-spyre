@@ -1210,11 +1210,13 @@ def lower_qfp8ch(x):
 
 @register_spyre_lowering(
     torch.ops.aten.eq.Scalar,
+    broadcast=True,
     type_promotion_kind=None,
     override_return_dtype=torch.bool,
 )
 @register_spyre_lowering(
     torch.ops.aten.eq.Tensor,
+    broadcast=True,
     type_promotion_kind=None,
     override_return_dtype=torch.bool,
 )
