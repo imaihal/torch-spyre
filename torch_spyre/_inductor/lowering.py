@@ -1203,7 +1203,7 @@ def lower_div(x, y, *, rounding_mode=None):
         if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
             return with_int64_fallback(lowering.div, x, y, convert_output=True)
         else:
-            raise ValueError(
+            raise Unsupported(
                 f"trunc rounding_mode only supports int64 tensors, but got {x.get_dtype()}"
             )
     elif rounding_mode == "floor":
@@ -1217,7 +1217,7 @@ def lower_div(x, y, *, rounding_mode=None):
             result = to_dtype(result, torch.int64)
         return result
     else:
-        raise ValueError(f"Unsupported rounding_mode: {rounding_mode}")
+        raise Unsupported(f"Unsupported rounding_mode: {rounding_mode}")
 
 
 @register_spyre_lowering(

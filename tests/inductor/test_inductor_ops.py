@@ -6209,8 +6209,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             tiny_value_mask = torch.abs(y) < EPS
             y[tiny_value_mask] = EPS
 
-        print(f"x: {x}")
-        print(f"y: {y}")
         self.compare_with_cpu(fn, x, y, run_eager=True)
 
 
