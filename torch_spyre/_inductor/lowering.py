@@ -1254,6 +1254,6 @@ def _lower_eq(x, y):
 
     # Perform comparison
     result = fn(x_norm, y_norm)
-
+    result.realize()
     # Always cast result to bool to match aten.eq semantics
     return to_dtype(result, torch.bool)
