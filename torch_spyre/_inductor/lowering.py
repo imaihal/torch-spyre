@@ -707,7 +707,7 @@ def lower_sum_default(x, *, dtype=None):
 
     # Handle bool input with int64 output via fp conversion
     if input_dtype == torch.bool and target_dtype == torch.int64:
-        comp_dtype = torch.float16  # torch.float32
+        comp_dtype = torch.float32  # torch.float16
         # Step 1: Convert bool to fp
         x_fp = to_dtype(x, comp_dtype)
         x_fp.realize()

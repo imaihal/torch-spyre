@@ -3315,6 +3315,24 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        ("test_sum_default", "test_sum_default_base"): {
+            "ops_dict": {"sum": torch.sum},
+            "expect_fail": [
+                "fp32_unaligned",
+                "bool_unaligned",
+            ],
+            "param_sets": {
+                "fp16_1d": (cached_randn((256,), dtype=torch.float16),),
+                "fp16_2d": (cached_randn((67, 256), dtype=torch.float16),),
+                "fp16_unaligned": (cached_randn((67, 257), dtype=torch.float16),),
+                "fp32_1d": (cached_randn((256,), dtype=torch.float32),),
+                "fp32_2d": (cached_randn((67, 256), dtype=torch.float32),),
+                "fp32_unaligned": (cached_randn((67, 257), dtype=torch.float32),),
+                "bool_1d": (cached_randn((256,), dtype=torch.float16) > 0,),
+                "bool_2d": (cached_randn((67, 256), dtype=torch.float16) > 0,),
+                "bool_unaligned": (cached_randn((67, 257), dtype=torch.float16) > 0,),
+            },
+        },
         ("test_mean_keepdim1", "test_mean_eager"): {
             "ops_dict": {"mean": torch.mean},
             "expect_fail": [
@@ -5722,6 +5740,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
     def test_sum_eager(self, op, dim: int, keepdim: bool, x):
         self.compare_with_cpu(lambda x: op(x, dim=dim, keepdim=keepdim), x)
+
+    def test_sum_default_base(self, op, x):
+        self.compare_with_cpu(lambda x: op(x), x)
 
     def test_mean_eager(self, op, dim: int, keepdim: bool, x):
         self.compare_with_cpu(lambda x: op(x, dim=dim, keepdim=keepdim), x)
