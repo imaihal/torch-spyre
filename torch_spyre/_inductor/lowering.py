@@ -1081,7 +1081,53 @@ def to_dtype(x, dst_dtype):
         op = torch.ops.spyre.to_dtype_cpu.default
         return eager_fallback(op, x, dst_dtype)
 
-    return lowering.to_dtype(x, dst_dtype, copy=True)
+    raw = lowering.to_dtype(x, dst_dtype, copy=True)
+
+    # The Spyre fp32todl16 hardware instruction writes its fp16 output in a
+    # shuffled order: it interleaves pairs of 4-element groups, placing the
+    # even-indexed groups in the first half of the output buffer and the
+    # odd-indexed groups in the second half.  Concretely, for N elements:
+    #
+    #   out[8k:8k+4]   ← in[4k:4k+4]           for k = 0 … N//8-1
+    #   out[8k+4:8k+8] ← in[4k+N//2:4k+4+N//2]
+    #
+    # Apply the inverse permutation so consumers see the correct order:
+    #
+    #   g = raw.reshape(N//8, 8)      # each row: [even_quad | odd_quad]
+    #   low4  = g[:, 0:4].reshape(-1) # even groups → positions 0 … N//2-1
+    #   high4 = g[:, 4:8].reshape(-1) # odd  groups → positions N//2 … N-1
+    #   fixed = cat([low4, high4]).reshape(orig_shape)
+    #
+    # Only fp32 → fp16/bfloat16 uses this instruction; all other casts
+    # (identity, dl16tofp32, fp8todl16) produce correctly ordered output.
+    _FP32_TO_FP16_DTYPES = (torch.float16, torch.bfloat16)
+    if src_dtype != torch.float32 or dst_dtype not in _FP32_TO_FP16_DTYPES:
+        return raw
+
+    orig_shape = list(x.get_size())
+    n = 1
+    for d in orig_shape:
+        n *= d
+
+    # reshape to (n//8, 8) — each row holds [even_quad | odd_quad].
+    # lowering.view requires a contiguous input, so realize the lazy
+    # Pointwise cast node first.
+    raw.realize()
+    g = lowering.view(raw, [n // 8, 8])
+
+    # Slice the two column halves (non-contiguous, stride=[8,1]).
+    # Clone each into a contiguous buffer before flattening — this mirrors
+    # what PyTorch does eagerly (slice → clone(contiguous) → reshape).
+    low4  = lowering.slice_(g, dim=1, start=0, end=4)   # (n//8, 4) even groups
+    high4 = lowering.slice_(g, dim=1, start=4, end=8)   # (n//8, 4) odd  groups
+    low4_c  = clone(low4,  memory_format=torch.contiguous_format)
+    high4_c = clone(high4, memory_format=torch.contiguous_format)
+
+    # flatten each contiguous half to 1-D, concatenate, restore original shape
+    low4_flat  = lowering.view(low4_c,  [n // 2])
+    high4_flat = lowering.view(high4_c, [n // 2])
+    flat       = lower_cat([low4_flat, high4_flat], dim=0)
+    return lowering.view(flat, orig_shape)
 
 
 def with_int64_fallback(fn, *args, convert_output=True):
