@@ -1118,15 +1118,16 @@ def to_dtype(x, dst_dtype):
     # Slice the two column halves (non-contiguous, stride=[8,1]).
     # Clone each into a contiguous buffer before flattening — this mirrors
     # what PyTorch does eagerly (slice → clone(contiguous) → reshape).
-    low4  = lowering.slice_(g, dim=1, start=0, end=4)   # (n//8, 4) even groups
-    high4 = lowering.slice_(g, dim=1, start=4, end=8)   # (n//8, 4) odd  groups
-    low4_c  = clone(low4,  memory_format=torch.contiguous_format)
+    low4 = lowering.slice_(g, dim=1, start=0, end=4)  # (n//8, 4) even groups
+    high4 = lowering.slice_(g, dim=1, start=4, end=8)  # (n//8, 4) odd  groups
+    low4_c = clone(low4, memory_format=torch.contiguous_format)
     high4_c = clone(high4, memory_format=torch.contiguous_format)
 
     # flatten each contiguous half to 1-D, concatenate, restore original shape
-    low4_flat  = lowering.view(low4_c,  [n // 2])
+    low4_flat = lowering.view(low4_c, [n // 2])
     high4_flat = lowering.view(high4_c, [n // 2])
-    flat       = lower_cat([low4_flat, high4_flat], dim=0)
+
+    flat = lower_cat([low4_flat, high4_flat], dim=0)
     return lowering.view(flat, orig_shape)
 
 
