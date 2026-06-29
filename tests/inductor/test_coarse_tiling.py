@@ -690,6 +690,197 @@ class TestDivideRanges(unittest.TestCase):
         self.assertFalse(hasattr(red, _LOOPS_FREE_SYMS_KEY))
         self.assertFalse(hasattr(red, _REDUCTION_FREE_SYMS_KEY))
 
+    # ------------------------------------------------------------------
+    # Device-layout reconstruction tests (FixedTiledLayout path)
+    # ------------------------------------------------------------------
+
+    def _make_ftl_op(self, host_size, dim_order, dtype=torch.float16, elem_arr=None):
+        """Build a ComputedBuffer with a FixedTiledLayout for testing _divide_ranges.
+
+        Returns (op, layout) where layout.device_layout is a SpyreTensorLayout
+        constructed from (host_size, contiguous_strides, dtype, dim_order, elem_arr).
+        """
+        from torch._inductor.ir import ComputedBuffer, FlexibleLayout, Pointwise
+
+        from torch_spyre._C import ElementArrangement, SpyreTensorLayout
+        from torch_spyre._inductor.ir import FixedTiledLayout
+
+        if elem_arr is None:
+            elem_arr = ElementArrangement.STANDARD
+
+        strides = [int(s) for s in FlexibleLayout.contiguous_strides(host_size)]
+        device_layout = SpyreTensorLayout(
+            host_size, strides, dtype, dim_order, elem_arr
+        )
+        layout = FixedTiledLayout(
+            torch.device("cpu"),
+            dtype,
+            [Integer(s) for s in host_size],
+            [Integer(s) for s in strides],
+            device_layout,
+        )
+        pw = Pointwise(
+            device=torch.device("cpu"),
+            dtype=dtype,
+            inner_fn=lambda index: sympy.Integer(1),
+            ranges=[Integer(s) for s in host_size],
+        )
+        op = ComputedBuffer(name="buf0", layout=layout, data=pw)
+        return op, layout
+
+    def test_divide_ranges_transposed_stick_preserved(self):
+        """Tiling a non-stick dim of a transposed-stick layout rebuilds
+        device_layout correctly (headline regression from code review)."""
+        from torch._inductor.ir import FlexibleLayout
+
+        from torch_spyre._C import SpyreTensorLayout
+
+        # [256, 128] with stick on dim0: dim_order=[1, 0].  This is the layout
+        # produced for a transposed Linear weight (model_utils.py restickify).
+        op, layout = self._make_ftl_op([256, 128], dim_order=[1, 0])
+
+        # Tile non-stick dim1 by 2: [256, 128] -> [256, 64].
+        _divide_ranges(op, Integer(2), tiled_dims=[1])
+
+        # Expected: from-scratch SpyreTensorLayout([256, 64], ..., [1, 0]).
+        expected_strides = [
+            int(s) for s in FlexibleLayout.contiguous_strides([256, 64])
+        ]
+        expected = SpyreTensorLayout([256, 64], expected_strides, torch.float16, [1, 0])
+
+        self.assertEqual(layout.device_layout, expected)
+
+        # Also assert it differs from the buggy heuristic result.
+        buggy = SpyreTensorLayout(
+            [1, 256, 64],
+            [64, 64, 1],
+            expected.device_dtype,
+            expected.element_arrangement,
+        )
+        self.assertNotEqual(layout.device_layout, buggy)
+
+    def test_divide_ranges_preserves_element_arrangement(self):
+        """element_arrangement is copied verbatim — not silently reset to STANDARD."""
+        from torch._inductor.ir import FlexibleLayout
+
+        from torch_spyre._C import ElementArrangement, SpyreTensorLayout
+
+        op, layout = self._make_ftl_op(
+            [256, 128], dim_order=[1, 0], elem_arr=ElementArrangement.EXX2
+        )
+
+        _divide_ranges(op, Integer(2), tiled_dims=[1])
+
+        self.assertEqual(
+            layout.device_layout.element_arrangement, ElementArrangement.EXX2
+        )
+
+        # Confirm the rebuilt layout also has the right shape.
+        expected_strides = [
+            int(s) for s in FlexibleLayout.contiguous_strides([256, 64])
+        ]
+        expected = SpyreTensorLayout(
+            [256, 64], expected_strides, torch.float16, [1, 0], ElementArrangement.EXX2
+        )
+        self.assertEqual(layout.device_layout, expected)
+
+    def test_divide_ranges_stride_collision(self):
+        """Tiling an outer dim when stride_map has two entries with the same
+        value (device_size tiebreak case) produces the correct device_layout."""
+        from torch._inductor.ir import FlexibleLayout
+
+        from torch_spyre._C import SpyreTensorLayout
+
+        # [2, 2, 2, 16] contiguous, stick on dim3 (last).  host_stride[0]=64
+        # equals 64*host_stride[3], so the stick tile-count and a non-stick dim
+        # share a stride_map value; stride check must break the tie.
+        op, layout = self._make_ftl_op([2, 2, 2, 16], dim_order=[0, 1, 2, 3])
+
+        # Tile dim0: [2,2,2,16] -> [1,2,2,16].
+        _divide_ranges(op, Integer(2), tiled_dims=[0])
+
+        expected_strides = [
+            int(s) for s in FlexibleLayout.contiguous_strides([1, 2, 2, 16])
+        ]
+        expected = SpyreTensorLayout(
+            [1, 2, 2, 16], expected_strides, torch.float16, [0, 1, 2, 3]
+        )
+        self.assertEqual(layout.device_layout, expected)
+
+    def test_divide_ranges_tile_count_size_collision(self):
+        """Tile-count device_size equals a non-stick host dim size — the stride
+        check (not size alone) must classify it correctly.
+
+        [2, 128] with stick on dim1: tile-count device_size = ceil(128/64) = 2,
+        which equals old_host_size[0] = 2.  Without the stride check, Pass 1
+        misclassifies the tile-count dim as non-stick and never updates it."""
+        from torch._inductor.ir import FlexibleLayout
+
+        from torch_spyre._C import SpyreTensorLayout
+
+        op, layout = self._make_ftl_op([2, 128], dim_order=[0, 1])
+
+        # Tile dim0: [2, 128] -> [1, 128].
+        _divide_ranges(op, Integer(2), tiled_dims=[0])
+
+        expected_strides = [int(s) for s in FlexibleLayout.contiguous_strides([1, 128])]
+        expected = SpyreTensorLayout([1, 128], expected_strides, torch.float16, [0, 1])
+        self.assertEqual(layout.device_layout, expected)
+
+    def test_resize_device_layout_grow_from_singleton(self):
+        """_allocate_full_buffer grow path: a device dim tiled to size 1
+        (stride_map != -1) must be grown back on the full-buffer allocation.
+
+        [1, 128] grow dim0 -> [4, 128]: the size-1 non-stick device dim must
+        update to device_size=4, not remain frozen at 1."""
+        from torch_spyre._C import SpyreTensorLayout
+        from torch_spyre._inductor.coarse_tile import _resize_device_layout
+
+        # Per-tile buffer is [1, 128] — dim0 was tiled to extent 1.
+        # device_size=[2, 1, 64], stride_map=[64, -1, 1].
+        stl = SpyreTensorLayout([1, 128], [128, 1], torch.float16, [0, 1])
+        result = _resize_device_layout(stl, [1, 128], [4, 128])
+
+        expected = SpyreTensorLayout([4, 128], [128, 1], torch.float16, [0, 1])
+        self.assertEqual(result, expected)
+
+    def test_resize_device_layout_raises_on_unsupported(self):
+        """_resize_device_layout raises RuntimeError when the stick host dim
+        cannot be uniquely identified from stride_map[-1].
+
+        This guards against unsupported layouts (e.g. future multi-host-dim
+        sticks) rather than silently producing a wrong result.
+        """
+        from torch_spyre._C import SpyreTensorLayout
+        from torch_spyre._inductor.coarse_tile import _resize_device_layout
+
+        # Build a real [2, 2] STL (stick on dim1, stride_map[-1] == 1).
+        # Then call the helper with a synthetic old_host_size=[1, 1] whose
+        # contiguous strides are both 1 — two dims share stride_map[-1], so
+        # p* cannot be identified uniquely.
+        stl = SpyreTensorLayout([2, 2], [2, 1], torch.float16, [0, 1])
+        with self.assertRaises(RuntimeError):
+            _resize_device_layout(stl, [1, 1], [1, 1])
+
+    def test_resize_device_layout_reduction_output(self):
+        """Reduction output: stick host dim has been eliminated, so old_host_size
+        has no unmatched dim.  _resize_device_layout must handle this gracefully
+        by leaving the tile-count and inner-stick entries frozen."""
+        from torch_spyre._C import SpyreTensorLayout
+        from torch_spyre._inductor.coarse_tile import _resize_device_layout
+
+        # [128] reduction output: SpyreTensorLayout([128], [1], fp16, [0]).
+        # device_size=[1, 128, 64], stride_map=[-1, 1, -1] — tile-count dim is
+        # frozen at 1 (stick collapsed), inner stick frozen at -1.
+        stl = SpyreTensorLayout([128], [1], torch.float16, [0])
+        # Tile the non-stick dim: [128] -> [64].
+        result = _resize_device_layout(stl, [128], [64])
+
+        # Non-stick device dim (j=1, size 128) updates to size 64, stride 1.
+        # Tile-count (j=0, size 1) and inner stick (j=2, size 64) are frozen.
+        expected = SpyreTensorLayout([64], [1], torch.float16, [0])
+        self.assertEqual(result, expected)
+
 
 def _mock_op_out_coords(op):
     """Return pre-built coords stored on op by _make_hinted_op, or empty list."""
@@ -1684,7 +1875,7 @@ class TestGenerateBundleMlirSnapshot(unittest.TestCase):
             "\t\t%c1 = arith.constant 1 : index\n"
             "\t\t%loop_bound_0 = arith.constant 8 : index\n"
             "\t\tscf.for %i_0 = %c0 to %loop_bound_0 step %c1 {\n"
-            '\t\t\tsdscbundle.sdsc_execute () {sdsc_filename="sdsc_0.json"}\n'
+            '\t\t\tsdscbundle.sdsc_execute () {sdsc_filename="sdsc_0.json", "symbol_ids"=[]}\n'
             "\t\t}\n"
             "\t\treturn\n"
             "\t}\n"
@@ -1698,7 +1889,7 @@ class TestGenerateBundleMlirSnapshot(unittest.TestCase):
         expected = (
             "module {\n"
             "\tfunc.func @sdsc_bundle() {\n"
-            '\t\tsdscbundle.sdsc_execute () {sdsc_filename="sdsc_0.json"}\n'
+            '\t\tsdscbundle.sdsc_execute () {sdsc_filename="sdsc_0.json", "symbol_ids"=[]}\n'
             "\t\treturn\n"
             "\t}\n"
             "}\n"
@@ -3461,6 +3652,214 @@ class TestReductionIdentityValues(unittest.TestCase):
         from torch_spyre._inductor.constants import BATCH_MATMUL_OP
 
         self.assertEqual(self._identity(BATCH_MATMUL_OP), 0)
+
+
+# ===========================================================================
+# TestReorderUnhintedInterlopers
+# ===========================================================================
+
+
+def _make_rui_op(name, reads=(), hint_ids=(), mutates=()):
+    """Return a fake ComputedBuffer for reorder_unhinted_interlopers tests.
+
+    ``reads`` is an iterable of buffer names this op reads.
+    ``hint_ids`` is an iterable of hint-id integers; empty means unhinted.
+    ``mutates`` is an iterable of buffer names this op mutates in-place.
+    """
+    from torch._inductor.ir import ComputedBuffer
+    from torch_spyre._inductor.propagate_hints import DimHint
+
+    op = MagicMock(spec=ComputedBuffer)
+    op.get_name.return_value = name
+    op.get_read_names.return_value = OrderedSet(reads)
+    op.get_mutation_names.return_value = list(mutates)
+    if hint_ids:
+        op.dim_hints = [
+            DimHint(
+                dim_names=["d0"],
+                split_count=1,
+                loop_var=None,
+                is_reduction=False,
+                hint_id=hid,
+            )
+            for hid in hint_ids
+        ]
+    else:
+        op.dim_hints = []
+    return op
+
+
+def _make_rui_non_computed(name):
+    """Return a fake non-ComputedBuffer operation.
+
+    Uses an unspec'd MagicMock so isinstance(..., ComputedBuffer) is False,
+    which causes reorder_unhinted_interlopers to treat it as an immovable
+    boundary that breaks any hint-group run.
+    """
+    op = MagicMock()
+    op.get_name.return_value = name
+    return op
+
+
+class TestReorderUnhintedInterlopers(unittest.TestCase):
+    """reorder_unhinted_interlopers moves unhinted ops out of hint-group runs."""
+
+    def _run(self, ops):
+        from torch_spyre._inductor.coarse_tile import reorder_unhinted_interlopers
+
+        graph = SimpleNamespace(operations=list(ops))
+        reorder_unhinted_interlopers(graph)
+        return [op.get_name() for op in graph.operations]
+
+    def test_no_ops(self):
+        self.assertEqual(self._run([]), [])
+
+    def test_all_hinted_unchanged(self):
+        a = _make_rui_op("a", hint_ids=(0,))
+        b = _make_rui_op("b", hint_ids=(0,))
+        self.assertEqual(self._run([a, b]), ["a", "b"])
+
+    def test_all_unhinted_unchanged(self):
+        a = _make_rui_op("a")
+        b = _make_rui_op("b")
+        self.assertEqual(self._run([a, b]), ["a", "b"])
+
+    def test_interloper_moved_before_run(self):
+        # [hinted, unhinted, hinted] → [unhinted, hinted, hinted]
+        # unhinted has no data deps; move before is preferred.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x")  # interloper
+        b = _make_rui_op("b", hint_ids=(0,))
+        self.assertEqual(self._run([a, x, b]), ["x", "a", "b"])
+
+    def test_interloper_blocked_move_before_reads_hinted(self):
+        # x reads a's output → cannot move before a; try move-after.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x", reads=("a",))
+        b = _make_rui_op("b", hint_ids=(0,))
+        self.assertEqual(self._run([a, x, b]), ["a", "b", "x"])
+
+    def test_interloper_move_after_blocked_by_hinted_reader(self):
+        # x reads a (blocks move-before) AND b reads x (blocks move-after) → error.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x", reads=("a",))
+        b = _make_rui_op("b", reads=("x",), hint_ids=(0,))
+        c = _make_rui_op("c", hint_ids=(0,))
+        with self.assertRaises(RuntimeError):
+            self._run([a, x, b, c])
+
+    def test_interloper_blocked_both_directions(self):
+        # x reads a (blocks move-before) AND b reads x (blocks move-after) → error.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x_out", reads=("a",))
+        b = _make_rui_op("b", reads=("x_out",), hint_ids=(0,))
+        with self.assertRaises(RuntimeError):
+            self._run([a, x, b])
+
+    def test_non_computed_buffer_breaks_run(self):
+        # A non-ComputedBuffer between two hinted ops cannot be reordered.
+        a = _make_rui_op("a", hint_ids=(0,))
+        extern = _make_rui_non_computed("extern")
+        b = _make_rui_op("b", hint_ids=(0,))
+        self.assertEqual(self._run([a, extern, b]), ["a", "extern", "b"])
+
+    def test_differently_hinted_breaks_run(self):
+        # An op with a different hint_id is not a candidate for reordering.
+        a = _make_rui_op("a", hint_ids=(0,))
+        c = _make_rui_op("c", hint_ids=(1,))
+        b = _make_rui_op("b", hint_ids=(0,))
+        self.assertEqual(self._run([a, c, b]), ["a", "c", "b"])
+
+    def test_multiple_interlopers_all_moveable_before(self):
+        # [H, U1, U2, H] with no deps → both move before.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x")
+        y = _make_rui_op("y")
+        b = _make_rui_op("b", hint_ids=(0,))
+        self.assertEqual(self._run([a, x, y, b]), ["x", "y", "a", "b"])
+
+    def test_multiple_interlopers_second_depends_on_first(self):
+        # y reads x → x can move before, but then y reads x which is now
+        # before the run start → y can also move before (after x).
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x")
+        y = _make_rui_op("y", reads=("x",))
+        b = _make_rui_op("b", hint_ids=(0,))
+        result = self._run([a, x, y, b])
+        # x moves before, then y (reads x, which is now before run_start)
+        # — y's reads are not produced by any op in run_start..j-1 after x moved.
+        self.assertEqual(result, ["x", "y", "a", "b"])
+
+    def test_trailing_consumer_not_error(self):
+        # Unhinted op after the run that reads run outputs — trailing consumer,
+        # not an interloper.  No hinted ops follow it so it should not raise.
+        a = _make_rui_op("a", hint_ids=(0,))
+        b = _make_rui_op("b", hint_ids=(0,))
+        x = _make_rui_op("x", reads=("a", "b"))
+        self.assertEqual(self._run([a, b, x]), ["a", "b", "x"])
+
+    def test_interloper_at_start_of_list(self):
+        # Unhinted op before any hinted op — no run started yet, nothing to do.
+        x = _make_rui_op("x")
+        a = _make_rui_op("a", hint_ids=(0,))
+        self.assertEqual(self._run([x, a]), ["x", "a"])
+
+    def test_move_after_multiple_trailing_hinted(self):
+        # [H, U, H, H] where U reads nothing and no one reads U:
+        # move-before is legal and preferred over move-after.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x")
+        b = _make_rui_op("b", hint_ids=(0,))
+        c = _make_rui_op("c", hint_ids=(0,))
+        self.assertEqual(self._run([a, x, b, c]), ["x", "a", "b", "c"])
+
+    def test_move_after_op_follows_run(self):
+        # [H, U(reads H), H, H, V(reads U)] — move-before blocked (x reads a);
+        # move-after should land x just after c, before d.
+        # Catches the pop-then-insert off-by-one: insert must be at run_end-1
+        # not run_end after the pop shifts indices.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x", reads=("a",))
+        b = _make_rui_op("b", hint_ids=(0,))
+        c = _make_rui_op("c", hint_ids=(0,))
+        d = _make_rui_op("d", reads=("x",))  # unhinted, reads x — after run
+        self.assertEqual(self._run([a, x, b, c, d]), ["a", "b", "c", "x", "d"])
+
+    def test_interloper_with_unhinted_gap_before_next_hinted(self):
+        # [H, U(reads H), V(unhinted), H2] — run_end must span past V to H2.
+        # Without this fix, run_end collapses to j+1=V and move-after is a
+        # silent no-op that leaves U in place with no error.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x", reads=("a",))  # blocked from moving before
+        v = _make_rui_op("v")  # another unhinted op (no deps)
+        a2 = _make_rui_op("a2", hint_ids=(0,))
+        # v has no deps and moves before the run; x (reads a) cannot move before
+        # but can move after a2 (run_end spans past v to a2).
+        self.assertEqual(self._run([a, x, v, a2]), ["v", "a", "a2", "x"])
+
+    def test_non_contiguous_run_multiple_interlopers(self):
+        # [H, U1(reads H), H2, U2, H3] — U1 cannot move before (reads a);
+        # move-after must span to H3 (the last same-key op), not just H2.
+        # Without the fix U1 moves to between H2 and U2, still splitting [H3].
+        # With the fix: u1 moves after c (run_end spans to c); u2 then moves
+        # before the run; result is one contiguous hinted block [a, b, c].
+        a = _make_rui_op("a", hint_ids=(0,))
+        u1 = _make_rui_op("u1", reads=("a",))
+        b = _make_rui_op("b", hint_ids=(0,))
+        u2 = _make_rui_op("u2")
+        c = _make_rui_op("c", hint_ids=(0,))
+        self.assertEqual(self._run([a, u1, b, u2, c]), ["u2", "a", "b", "c", "u1"])
+
+    def test_mutating_interloper_blocked(self):
+        # x mutates buffer 'a' produced by a hinted op; x cannot legally move
+        # before the run (would run before 'a' is produced) and b reads x so
+        # x cannot move after — should raise RuntimeError.
+        a = _make_rui_op("a", hint_ids=(0,))
+        x = _make_rui_op("x", mutates=("a",))  # mutation dep on a
+        b = _make_rui_op("b", reads=("x",), hint_ids=(0,))
+        c = _make_rui_op("c", hint_ids=(0,))
+        with self.assertRaises(RuntimeError):
+            self._run([a, x, b, c])
 
 
 if __name__ == "__main__":
