@@ -317,6 +317,23 @@ FP32_EPS = torch.finfo(torch.float32).eps  # 1.1920928955078125e-07
 FP16_EPS = torch.finfo(torch.float16).eps  # 0.0009765625
 
 
+def _replace_near_zero(t: torch.Tensor) -> None:
+    """Replace near-zero values in *t* in-place to avoid division-by-zero.
+
+    The threshold (EPS) is chosen per dtype:
+      - int64  → 1
+      - float32 → FP32_EPS
+      - other  → FP16_EPS
+    """
+    if t.dtype == torch.int64:
+        eps = 1
+    elif t.dtype == torch.float32:
+        eps = FP32_EPS
+    else:
+        eps = FP16_EPS
+    t[torch.abs(t) < eps] = eps
+
+
 def _attention_fn(q, k, v, scale=True):
     d_k = q.size(-1)
     scores = q @ k.transpose(-2, -1)
@@ -4542,14 +4559,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         if op == torch.div:
             # TODO: Division by 0 or near-zero differs on Spyre from CPU, sidestep for now.
             if isinstance(b, torch.Tensor):
-                if b.dtype == torch.int64:
-                    EPS = 1
-                elif b.dtype == torch.float32:
-                    EPS = FP32_EPS
-                else:
-                    EPS = FP16_EPS
-                tiny_value_mask = torch.abs(b) < EPS
-                b[tiny_value_mask] = EPS
+                _replace_near_zero(b)
 
         self.compare_with_cpu(op, a, b)
 
@@ -6196,14 +6206,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             return torch.div(a, b, rounding_mode=rounding_mode)
 
         if isinstance(y, torch.Tensor):
-            if y.dtype == torch.int64:
-                EPS = 1
-            elif y.dtype == torch.float32:
-                EPS = 0.01  # FP32_EPS
-            else:
-                EPS = 0.01  # FP16_EPS
-            tiny_value_mask = torch.abs(y) < EPS
-            y[tiny_value_mask] = EPS
+            _replace_near_zero(y)
 
         self.compare_with_cpu(fn, x, y, run_eager=True)
 
