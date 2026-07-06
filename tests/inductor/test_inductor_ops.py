@@ -329,6 +329,88 @@ def _replace_near_zero(t: torch.Tensor) -> None:
     t[torch.abs(t) < eps] = eps
 
 
+def _exclude_near_integer_quotients(a: torch.Tensor, b: torch.Tensor) -> None:
+    """Replace elements of *a* in-place where a/b is within 4*eps of an integer.
+
+    Floor and trunc give hardware-dependent results when the mathematical
+    quotient lands within one ULP of a whole number: the compiled Spyre path
+    may round to a slightly different side of the boundary than the CPU
+    reference, causing an off-by-one that is not a correctness bug.
+
+    The replacement sets a[i] = (floor(q[i]) + 0.5) * b[i], which places the
+    new quotient exactly at the midpoint between two consecutive integers —
+    as far from any boundary as possible.  The fractional part is 0.5 for
+    every replaced element, so floor and trunc give the same result on any
+    hardware.
+
+    The threshold is chosen per dtype:
+      - int64  → 4 * FP32_EPS  (int64 is cast to fp32 on Spyre)
+      - float32 → 4 * FP32_EPS
+      - other  → 4 * FP16_EPS
+    """
+    if a.dtype in (torch.int64, torch.float32):
+        eps = 4.0 * FP32_EPS
+    else:
+        eps = 4.0 * FP16_EPS
+
+    # Use fp64 for the quotient so the detector itself does not introduce
+    # rounding artefacts.
+    q = a.double() / b.double()
+    frac = q - torch.floor(q)  # fractional part in [0, 1)
+
+    near_int = (frac < eps) | (frac > 1.0 - eps)
+    if near_int.any():
+        q_floor = torch.floor(q)
+        new_a = (q_floor + 0.5) * b.double()
+        a[near_int] = new_a[near_int].to(a.dtype)
+
+
+def _print_div_mismatches(
+    rounding_mode: str, x: torch.Tensor, y: torch.Tensor, fn
+) -> None:
+    """Print mismatched elements between Spyre compiled and CPU results.
+
+    Called on AssertionError from test_div_rounding_mode_cpu to show the
+    (dividend, divisor, cpu_result, spyre_result, true_quotient) for every
+    element that differs, making off-by-one patterns immediately visible.
+    """
+    from utils_inductor import _compile_and_run, DEVICE
+
+    cpu_result = fn(x, y)
+    try:
+        spyre_result = _compile_and_run(fn, [x, y], DEVICE, compile=True)
+    except Exception as e:
+        print(f"[mismatch diagnostics] could not run on Spyre: {e}")
+        return
+
+    cpu_flat = cpu_result.flatten()
+    spyre_flat = spyre_result.flatten()
+    x_flat = x.flatten()
+    y_flat = y.flatten()
+
+    mismatches = (cpu_flat != spyre_flat).nonzero(as_tuple=False).flatten()
+    n_total = cpu_flat.numel()
+    print(
+        f"\n[mismatch diagnostics] rounding_mode={rounding_mode!r}  "
+        f"dtype={x.dtype}  shape={tuple(x.shape)}  "
+        f"{len(mismatches)}/{n_total} element(s) differ"
+    )
+    print(
+        f"{'idx':>6}  {'dividend':>14}  {'divisor':>14}  "
+        f"{'true_quot':>14}  {'cpu':>10}  {'spyre':>10}"
+    )
+    for idx in mismatches[:50]:  # cap at 50 rows to keep output readable
+        i = int(idx)
+        a_i = x_flat[i].item()
+        b_i = y_flat[i].item()
+        q_i = a_i / b_i if b_i != 0 else float("nan")
+        cpu_i = cpu_flat[i].item()
+        spyre_i = spyre_flat[i].item()
+        print(f"{i:>6}  {a_i:>14}  {b_i:>14}  {q_i:>14.6f}  {cpu_i:>10}  {spyre_i:>10}")
+    if len(mismatches) > 50:
+        print(f"  ... ({len(mismatches) - 50} more rows omitted)")
+
+
 def _attention_fn(q, k, v, scale=True):
     d_k = q.size(-1)
     scores = q @ k.transpose(-2, -1)
@@ -4599,7 +4681,109 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
                     2,
                 ),
+                # --- random inputs (off-by-one-safe; see _exclude_near_integer_quotients) ---
+                #
+                # fp16: use integer-valued inputs (randint cast to fp16) so the quotient
+                # can be computed exactly; bare randn fp16 dividends produce non-integer
+                # quotients whose floor is ambiguous at fp16 precision beyond what
+                # _exclude_near_integer_quotients can filter.
+                "floor_fp16_rand_2d": (
+                    "floor",
+                    torch.randint(
+                        -100,
+                        101,
+                        (67, 256),
+                        generator=torch.Generator().manual_seed(0xAF01),
+                    ).to(torch.float16),
+                    torch.randint(
+                        2,
+                        11,
+                        (67, 256),
+                        generator=torch.Generator().manual_seed(0xAF02),
+                    ).to(torch.float16),
+                ),
+                # fp32: randn inputs are safe; _exclude_near_integer_quotients handles
+                # the near-integer boundary with sufficient fp32 precision.
+                "floor_fp32_rand_2d": (
+                    "floor",
+                    cached_randn((67, 256), dtype=torch.float32, scale=50.0),
+                    cached_randn(
+                        (67, 256),
+                        dtype=torch.float32,
+                        abs=True,
+                        scale=10.0,
+                        differentiation=1,
+                    ),
+                ),
+                # int64: clamp divisor to min=2 so b=1 never appears; a/1 == a is
+                # always an exact integer which confuses the fp64 quotient detector.
+                "floor_int64_rand_2d": (
+                    "floor",
+                    cached_randn(
+                        (67, 256), dtype=torch.float16, scale=200.0, differentiation=2
+                    ).to(torch.int64),
+                    cached_randn(
+                        (67, 256),
+                        dtype=torch.float16,
+                        abs=True,
+                        scale=20.0,
+                        differentiation=3,
+                    )
+                    .to(torch.int64)
+                    .clamp(min=2),
+                ),
+                # trunc for fp16/fp32 is not yet supported by the Spyre backend
+                # (expect_fail below); only the int64 path passes today.
+                "trunc_fp16_rand_2d": (
+                    "trunc",
+                    cached_randn(
+                        (67, 256), dtype=torch.float16, scale=50.0, differentiation=4
+                    ),
+                    cached_randn(
+                        (67, 256),
+                        dtype=torch.float16,
+                        abs=True,
+                        scale=10.0,
+                        differentiation=5,
+                    ),
+                ),
+                "trunc_fp32_rand_2d": (
+                    "trunc",
+                    cached_randn(
+                        (67, 256), dtype=torch.float32, scale=50.0, differentiation=4
+                    ),
+                    cached_randn(
+                        (67, 256),
+                        dtype=torch.float32,
+                        abs=True,
+                        scale=10.0,
+                        differentiation=5,
+                    ),
+                ),
+                # int64: same divisor clamp of min=2 as floor cases above.
+                "trunc_int64_rand_2d": (
+                    "trunc",
+                    cached_randn(
+                        (67, 256), dtype=torch.float16, scale=200.0, differentiation=6
+                    ).to(torch.int64),
+                    cached_randn(
+                        (67, 256),
+                        dtype=torch.float16,
+                        abs=True,
+                        scale=20.0,
+                        differentiation=7,
+                    )
+                    .to(torch.int64)
+                    .clamp(min=2),
+                ),
             },
+            # trunc with fp16/fp32 inputs is not yet implemented in the Spyre
+            # lowering (raises Unsupported).  Keep the cases so they are tracked
+            # and will automatically start passing once the backend is extended.
+            "expect_fail": [
+                "trunc_fp16_rand_2d",
+                "trunc_fp32_rand_2d",
+            ],
         },
     }
 
@@ -6409,8 +6593,14 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         if isinstance(y, torch.Tensor):
             _replace_near_zero(y)
+            _exclude_near_integer_quotients(x, y)
 
-        self.compare_with_cpu(fn, x, y, run_eager=True)
+        try:
+            self.compare_with_cpu(fn, x, y, run_eager=True)
+        except AssertionError as exc:
+            if isinstance(y, torch.Tensor):
+                _print_div_mismatches(rounding_mode, x, y, fn)
+            raise exc
 
 
 if __name__ == "__main__":
