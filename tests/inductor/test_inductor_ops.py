@@ -333,26 +333,20 @@ def _exclude_near_integer_quotients(a: torch.Tensor, b: torch.Tensor) -> None:
     """Replace elements of *a* in-place so that no quotient a/b is near an integer.
 
     floor and trunc give hardware-dependent results when the computed quotient
-    lands within one ULP of a whole number and rounds to the wrong side.  The
-    maximum rounding error in a single IEEE 754 division is half a ULP:
+    lands within one ULP of a whole number — the rounding can go either way
+    depending on the hardware or compiler.  To avoid this, any element whose
+    quotient is within half a ULP of an integer is replaced with a value whose
+    quotient sits at the midpoint between two integers (frac = 0.5), which is
+    unambiguous for both floor and trunc on any hardware.
 
-        max_error(q) = 0.5 * eps * 2^floor(log2(|q|))  ≈  0.5 * eps * |q|
+    The detection threshold scales with the quotient magnitude (0.5 * eps * |q|)
+    rather than being a fixed constant, so it stays correct for large quotients.
+    eps is FP32_EPS for float32 and int64 inputs, FP16_EPS for float16.
 
-    The threshold therefore scales with the quotient magnitude rather than
-    being a fixed multiple of eps.  A fixed threshold (e.g. 4 * eps) is only
-    safe for |q| <= 8 and silently misses larger quotients.
+    The replacement value is  a[i] = (floor(q[i]) + 0.5) * b[i].
 
-    For int64 inputs the Spyre lowering casts to fp32 before dividing, so
-    FP32_EPS is used as the base epsilon.  For float16 inputs FP16_EPS is used.
-
-    When an element is near an integer, a[i] is replaced with
-    (floor(q[i]) + 0.5) * b[i], placing the quotient at the midpoint between
-    two consecutive integers (frac = 0.5), which is unambiguous for floor and
-    trunc on any hardware.
-
-    Note: for int64, the replacement (floor(q) + 0.5) * b may equal a again
-    when b = 1 because the 0.5 is lost in the cast back to int64.  Callers
-    must therefore ensure b >= 2 for int64 inputs.
+    Note: for int64, callers must ensure b >= 2.  When b = 1 the 0.5 offset is
+    lost when casting back to int64, making the replacement a no-op.
     """
     if a.dtype in (torch.int64, torch.float32):
         eps = FP32_EPS
@@ -4625,8 +4619,25 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
                     2,
                 ),
-                # trunc for fp16/fp32 is not yet supported by the Spyre backend
-                # (expect_fail below); only the int64 path passes today.
+                # int64: same input construction as floor_int64_rand_2d; b>=2
+                # is required for the same reason (see comment above).
+                "trunc_int64_rand_2d": (
+                    "trunc",
+                    cached_randn(
+                        (67, 256), dtype=torch.float16, scale=200.0, differentiation=6
+                    ).to(torch.int64),
+                    cached_randn(
+                        (67, 256),
+                        dtype=torch.float16,
+                        abs=True,
+                        scale=20.0,
+                        differentiation=7,
+                    )
+                    .to(torch.int64)
+                    .clamp(min=2),
+                ),
+                # ── trunc fp16/fp32: not yet implemented ─────────────────────────
+                # The Spyre lowering raises Unsupported for trunc on float types.
                 "trunc_fp16_rand_2d": (
                     "trunc",
                     cached_randn(
@@ -4653,30 +4664,76 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                         differentiation=5,
                     ),
                 ),
-                # int64: same input construction as floor_int64_rand_2d; b>=2
-                # is required for the same reason (see comment above).
-                "trunc_int64_rand_2d": (
-                    "trunc",
-                    cached_randn(
-                        (67, 256), dtype=torch.float16, scale=200.0, differentiation=6
-                    ).to(torch.int64),
-                    cached_randn(
-                        (67, 256),
-                        dtype=torch.float16,
-                        abs=True,
-                        scale=20.0,
-                        differentiation=7,
-                    )
-                    .to(torch.int64)
-                    .clamp(min=2),
-                ),
             },
-            # trunc with fp16/fp32 inputs is not yet implemented in the Spyre
-            # lowering (raises Unsupported).  Keep the cases so they are tracked
-            # and will automatically start passing once the backend is extended.
             "expect_fail": [
                 "trunc_fp16_rand_2d",
                 "trunc_fp32_rand_2d",
+            ],
+        },
+        # ── xfail group: known off-by-one and unsupported cases ──────────────────
+        #
+        # This group uses test_div_rounding_mode_xfail_cpu which does NOT call
+        # _exclude_near_integer_quotients().  The inputs are chosen deliberately
+        # to trigger off-by-one behaviour so that the failure is reliably
+        # reproduced and tracked.
+        ("test_div_rounding_mode_xfail", "test_div_rounding_mode_xfail_cpu"): {
+            "param_sets": {
+                # ── int64 off-by-one: exact-integer quotient ─────────────────────
+                # The Spyre lowering casts int64 → fp32 before dividing.  When
+                # a % b == 0 the true quotient is an exact integer, but fp32
+                # rounding can produce  n - ε  (e.g. -3.0000002 instead of -3),
+                # so  floor(-3.0000002) = -4  instead of  -3.
+                "floor_int64_exact_quotient": (
+                    "floor",
+                    torch.tensor([-9, -12, -15, -999, -1000], dtype=torch.int64),
+                    torch.tensor([3, 4, 5, 9, 10], dtype=torch.int64),
+                ),
+                "trunc_int64_exact_quotient": (
+                    "trunc",
+                    torch.tensor([-9, -12, -15, 999, 1000], dtype=torch.int64),
+                    torch.tensor([3, 4, 5, 9, 10], dtype=torch.int64),
+                ),
+                # ── fp32 off-by-one: near-integer quotient ───────────────────────
+                # When b is not exactly representable in fp32 (e.g. 7/3), the
+                # computed quotient  fp32(a / b)  can land just below an integer:
+                #
+                #   a = -7.0,  b = fp32(7/3) ≈ 2.3333333
+                #   exact q = -3.0
+                #   fp32 q  = -3.0000002  →  floor = -4  (off by one)
+                #
+                # _exclude_near_integer_quotients is NOT applied here, so this
+                # off-by-one is reproduced as-is.
+                "floor_fp32_near_integer": (
+                    "floor",
+                    torch.tensor([-7.0, -14.0, -21.0, -35.0], dtype=torch.float32),
+                    # 7/3 is not exactly representable; the fp32 quotient rounds
+                    # down, making floor land on the wrong integer.
+                    torch.tensor(
+                        [7.0 / 3, 7.0 / 3, 7.0 / 3, 7.0 / 3], dtype=torch.float32
+                    ),
+                    # exact quotients: -3, -6, -9, -15
+                    # CPU result:       [-3, -6, -9, -15]
+                    # Spyre may return: [-4, -7, -10, -16]
+                ),
+                # ── fp16 off-by-one: near-integer quotient ───────────────────────
+                # fp16 ULP ≈ 0.001 relative, so any quotient whose fractional part
+                # is smaller than 0.001 * |q| is ambiguous.  Choosing b = fp16(7/3)
+                # (not exactly representable) and a = multiple of 7/3 reliably
+                # places the fp16 quotient just below an integer.
+                "floor_fp16_near_integer": (
+                    "floor",
+                    torch.tensor([-7.0, -14.0, -21.0], dtype=torch.float16),
+                    torch.tensor([7.0 / 3, 7.0 / 3, 7.0 / 3], dtype=torch.float16),
+                    # exact quotients: -3, -6, -9
+                    # CPU result:       [-3, -6, -9]
+                    # Spyre may return: [-4, -7, -10]
+                ),
+            },
+            "expect_fail": [
+                "floor_int64_exact_quotient",
+                "trunc_int64_exact_quotient",
+                "floor_fp32_near_integer",
+                "floor_fp16_near_integer",
             ],
         },
     }
@@ -6479,6 +6536,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         self.compare_with_cpu(fn, x, run_eager=False)
 
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
     def test_div_rounding_mode_cpu(self, rounding_mode, x, y):
         """Test torch.div with different rounding modes."""
 
@@ -6488,6 +6546,21 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         if isinstance(y, torch.Tensor):
             _replace_near_zero(y)
             _exclude_near_integer_quotients(x, y)
+
+        self.compare_with_cpu(fn, x, y, run_eager=True)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
+    def test_div_rounding_mode_xfail_cpu(self, rounding_mode, x, y):
+        """Known-failing torch.div rounding mode cases.
+
+        Inputs are chosen deliberately to trigger off-by-one
+        behaviour.  No input sanitisation (_exclude_near_integer_quotients) is
+        applied so that the failure is reproduced exactly as-is.
+        """
+
+        def fn(a, b):
+            return torch.div(a, b, rounding_mode=rounding_mode)
 
         self.compare_with_cpu(fn, x, y, run_eager=True)
 
