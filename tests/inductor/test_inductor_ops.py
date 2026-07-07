@@ -332,19 +332,27 @@ def _replace_near_zero(t: torch.Tensor) -> None:
 def _exclude_near_integer_quotients(a: torch.Tensor, b: torch.Tensor) -> None:
     """Replace elements of *a* in-place so that no quotient a/b is near an integer.
 
-    An off-by-one in floor/trunc occurs when the computed quotient lands within
-    one ULP of a whole number.  The maximum rounding error in a single IEEE 754
-    division is half a ULP:
+    floor and trunc give hardware-dependent results when the computed quotient
+    lands within one ULP of a whole number and rounds to the wrong side.  The
+    maximum rounding error in a single IEEE 754 division is half a ULP:
 
-        max_error(q) = 0.5 * eps * 2^floor(log2(|q|))  =  0.5 * eps * |q|
+        max_error(q) = 0.5 * eps * 2^floor(log2(|q|))  ≈  0.5 * eps * |q|
 
-    so the threshold must scale with the quotient magnitude, not be a fixed
-    multiple of eps.  A fixed threshold (e.g. 4 * eps) is only safe for
-    |q| <= 8 and misses larger quotients.
+    The threshold therefore scales with the quotient magnitude rather than
+    being a fixed multiple of eps.  A fixed threshold (e.g. 4 * eps) is only
+    safe for |q| <= 8 and silently misses larger quotients.
+
+    For int64 inputs the Spyre lowering casts to fp32 before dividing, so
+    FP32_EPS is used as the base epsilon.  For float16 inputs FP16_EPS is used.
 
     When an element is near an integer, a[i] is replaced with
     (floor(q[i]) + 0.5) * b[i], placing the quotient at the midpoint between
-    two consecutive integers (frac = 0.5), which is unambiguous on any hardware.
+    two consecutive integers (frac = 0.5), which is unambiguous for floor and
+    trunc on any hardware.
+
+    Note: for int64, the replacement (floor(q) + 0.5) * b may equal a again
+    when b = 1 because the 0.5 is lost in the cast back to int64.  Callers
+    must therefore ensure b >= 2 for int64 inputs.
     """
     if a.dtype in (torch.int64, torch.float32):
         eps = FP32_EPS
@@ -4583,8 +4591,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                         differentiation=1,
                     ),
                 ),
-                # int64: clamp divisor to min=2 so b=1 never appears; a/1 == a is
-                # always an exact integer which confuses the fp64 quotient detector.
+                # int64: clamp divisor to min=2.  When b=1, a/1 = a is always an
+                # exact integer, so _exclude_near_integer_quotients would try to
+                # replace a[i] with (floor(q)+0.5)*1 = a+0.5, which truncates back
+                # to a when cast to int64 — a no-op.  b>=2 avoids this edge case.
                 "floor_int64_rand_2d": (
                     "floor",
                     cached_randn(
@@ -4643,7 +4653,8 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                         differentiation=5,
                     ),
                 ),
-                # int64: same divisor clamp of min=2 as floor cases above.
+                # int64: same input construction as floor_int64_rand_2d; b>=2
+                # is required for the same reason (see comment above).
                 "trunc_int64_rand_2d": (
                     "trunc",
                     cached_randn(
