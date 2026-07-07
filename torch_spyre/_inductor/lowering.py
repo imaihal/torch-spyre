@@ -1211,7 +1211,7 @@ def lower_div(x, y, *, rounding_mode=None):
         # For int64: convert to fp32, divide, floor, convert back to int64
         # For fp16/fp32: divide and floor, keep original dtype
         result = with_int64_fallback(lowering.div, x, y, convert_output=False)
-        result.realize()
+        result.realize()  # materialize the fp32 buffer before the floor op
         result = lowering.floor(result)
         if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
             result = to_dtype(result, torch.int64)
