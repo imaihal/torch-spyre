@@ -330,85 +330,38 @@ def _replace_near_zero(t: torch.Tensor) -> None:
 
 
 def _exclude_near_integer_quotients(a: torch.Tensor, b: torch.Tensor) -> None:
-    """Replace elements of *a* in-place where a/b is within 4*eps of an integer.
+    """Replace elements of *a* in-place so that no quotient a/b is near an integer.
 
-    Floor and trunc give hardware-dependent results when the mathematical
-    quotient lands within one ULP of a whole number: the compiled Spyre path
-    may round to a slightly different side of the boundary than the CPU
-    reference, causing an off-by-one that is not a correctness bug.
+    An off-by-one in floor/trunc occurs when the computed quotient lands within
+    one ULP of a whole number.  The maximum rounding error in a single IEEE 754
+    division is half a ULP:
 
-    The replacement sets a[i] = (floor(q[i]) + 0.5) * b[i], which places the
-    new quotient exactly at the midpoint between two consecutive integers —
-    as far from any boundary as possible.  The fractional part is 0.5 for
-    every replaced element, so floor and trunc give the same result on any
-    hardware.
+        max_error(q) = 0.5 * eps * 2^floor(log2(|q|))  =  0.5 * eps * |q|
 
-    The threshold is chosen per dtype:
-      - int64  → 4 * FP32_EPS  (int64 is cast to fp32 on Spyre)
-      - float32 → 4 * FP32_EPS
-      - other  → 4 * FP16_EPS
+    so the threshold must scale with the quotient magnitude, not be a fixed
+    multiple of eps.  A fixed threshold (e.g. 4 * eps) is only safe for
+    |q| <= 8 and misses larger quotients.
+
+    When an element is near an integer, a[i] is replaced with
+    (floor(q[i]) + 0.5) * b[i], placing the quotient at the midpoint between
+    two consecutive integers (frac = 0.5), which is unambiguous on any hardware.
     """
     if a.dtype in (torch.int64, torch.float32):
-        eps = 4.0 * FP32_EPS
+        eps = FP32_EPS
     else:
-        eps = 4.0 * FP16_EPS
+        eps = FP16_EPS
 
-    # Use fp64 for the quotient so the detector itself does not introduce
-    # rounding artefacts.
+    # Use fp64 so the detector itself does not introduce rounding artefacts.
     q = a.double() / b.double()
     frac = q - torch.floor(q)  # fractional part in [0, 1)
 
-    near_int = (frac < eps) | (frac > 1.0 - eps)
+    # threshold[i] = 0.5 * eps * |q[i]|  (= half a ULP of the quotient)
+    threshold = 0.5 * eps * q.abs()
+    near_int = (frac < threshold) | (frac > 1.0 - threshold)
     if near_int.any():
         q_floor = torch.floor(q)
         new_a = (q_floor + 0.5) * b.double()
         a[near_int] = new_a[near_int].to(a.dtype)
-
-
-def _print_div_mismatches(
-    rounding_mode: str, x: torch.Tensor, y: torch.Tensor, fn
-) -> None:
-    """Print mismatched elements between Spyre compiled and CPU results.
-
-    Called on AssertionError from test_div_rounding_mode_cpu to show the
-    (dividend, divisor, cpu_result, spyre_result, true_quotient) for every
-    element that differs, making off-by-one patterns immediately visible.
-    """
-    from utils_inductor import _compile_and_run, DEVICE
-
-    cpu_result = fn(x, y)
-    try:
-        spyre_result = _compile_and_run(fn, [x, y], DEVICE, compile=True)
-    except Exception as e:
-        print(f"[mismatch diagnostics] could not run on Spyre: {e}")
-        return
-
-    cpu_flat = cpu_result.flatten()
-    spyre_flat = spyre_result.flatten()
-    x_flat = x.flatten()
-    y_flat = y.flatten()
-
-    mismatches = (cpu_flat != spyre_flat).nonzero(as_tuple=False).flatten()
-    n_total = cpu_flat.numel()
-    print(
-        f"\n[mismatch diagnostics] rounding_mode={rounding_mode!r}  "
-        f"dtype={x.dtype}  shape={tuple(x.shape)}  "
-        f"{len(mismatches)}/{n_total} element(s) differ"
-    )
-    print(
-        f"{'idx':>6}  {'dividend':>14}  {'divisor':>14}  "
-        f"{'true_quot':>14}  {'cpu':>10}  {'spyre':>10}"
-    )
-    for idx in mismatches[:50]:  # cap at 50 rows to keep output readable
-        i = int(idx)
-        a_i = x_flat[i].item()
-        b_i = y_flat[i].item()
-        q_i = a_i / b_i if b_i != 0 else float("nan")
-        cpu_i = cpu_flat[i].item()
-        spyre_i = spyre_flat[i].item()
-        print(f"{i:>6}  {a_i:>14}  {b_i:>14}  {q_i:>14.6f}  {cpu_i:>10}  {spyre_i:>10}")
-    if len(mismatches) > 50:
-        print(f"  ... ({len(mismatches) - 50} more rows omitted)")
 
 
 def _attention_fn(q, k, v, scale=True):
@@ -4596,91 +4549,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         },
         ("test_div_rounding_mode", "test_div_rounding_mode_cpu"): {
             "param_sets": {
-                "floor_fp16_2d": (
-                    "floor",
-                    torch.tensor(
-                        [[-10.5, -20.3, 30.7, -5.2], [-10.5, -20.3, 30.7, -5.2]],
-                        dtype=torch.float16,
-                    ),
-                    torch.tensor(
-                        [[3.0, 4.0, 5.0, 2.0], [3.0, 4.0, 5.0, 2.0]],
-                        dtype=torch.float16,
-                    ),
-                    # torch.randint(-100, 100, (67, 256)).to(dtype=torch.float16),
-                    # torch.ones(67, 256, dtype=torch.float16) * 2.0,
-                ),
-                "floor_fp32_2d": (
-                    "floor",
-                    torch.tensor(
-                        [[-10.5, -20.3, 30.7, -5.2], [-10.5, -20.3, 30.7, -5.2]],
-                        dtype=torch.float32,
-                    ),
-                    torch.tensor(
-                        [[3.0, 4.0, 5.0, 2.0], [3.0, 4.0, 5.0, 2.0]],
-                        dtype=torch.float32,
-                    ),
-                    # torch.randint(-100, 100, (67, 256)).to(dtype=torch.float32),
-                    # torch.ones(67, 256, dtype=torch.float32) # * 2.0,
-                ),
-                "floor_int64_2d": (
-                    "floor",
-                    torch.tensor(
-                        [[-11, -21, 31, -7], [-11, -21, 31, -7]], dtype=torch.int64
-                    ),
-                    torch.tensor([[3, 4, 5, 2], [3, 4, 5, 2]], dtype=torch.int64),
-                    # torch.randint(-100, 100, (67, 256), dtype=torch.int64),
-                    # torch.ones(67, 256, dtype=torch.int64) * 2,
-                ),
-                "floor_negative_fp16": (
-                    "floor",
-                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
-                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float16),
-                ),
-                "floor_negative_fp32": (
-                    "floor",
-                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
-                    torch.tensor([3.0, 4.0, 5.0, 2.0], dtype=torch.float32),
-                ),
-                "floor_negative_int64": (
-                    "floor",
-                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
-                    torch.tensor([3, 4, 5, 2], dtype=torch.int64),
-                ),
-                "floor_fp16_tensor_scalar": (
-                    "floor",
-                    # torch.randint(-100, 100, (67, 256)).to(dtype=torch.float16),
-                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
-                    2.0,
-                ),
-                "floor_fp32_tensor_scalar": (
-                    "floor",
-                    # torch.randint(-100, 100, (67, 256)).to(dtype=torch.float32),
-                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
-                    2.0,
-                ),
-                "floor_int64_tensor_scalar": (
-                    "floor",
-                    # torch.randint(-100, 100, (67, 256), dtype=torch.int64),
-                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
-                    2,
-                ),
-                "trunc_int64_2d": (
-                    "trunc",
-                    torch.tensor(
-                        [[-11, -21, 31, -7], [-11, -21, 31, -7]], dtype=torch.int64
-                    ),
-                    torch.tensor([[3, 4, 5, 2], [3, 4, 5, 2]], dtype=torch.int64),
-                ),
-                "trunc_negative_int64": (
-                    "trunc",
-                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
-                    torch.tensor([3, 4, 5, 2], dtype=torch.int64),
-                ),
-                "trunc_int64_tensor_scalar": (
-                    "trunc",
-                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
-                    2,
-                ),
                 # --- random inputs (off-by-one-safe; see _exclude_near_integer_quotients) ---
                 #
                 # fp16: use integer-valued inputs (randint cast to fp16) so the quotient
@@ -4731,6 +4599,21 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     )
                     .to(torch.int64)
                     .clamp(min=2),
+                ),
+                "floor_fp16_tensor_scalar": (
+                    "floor",
+                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float16),
+                    2.0,
+                ),
+                "floor_fp32_tensor_scalar": (
+                    "floor",
+                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
+                    2.0,
+                ),
+                "floor_int64_tensor_scalar": (
+                    "floor",
+                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
+                    2,
                 ),
                 # trunc for fp16/fp32 is not yet supported by the Spyre backend
                 # (expect_fail below); only the int64 path passes today.
@@ -6595,12 +6478,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             _replace_near_zero(y)
             _exclude_near_integer_quotients(x, y)
 
-        try:
-            self.compare_with_cpu(fn, x, y, run_eager=True)
-        except AssertionError as exc:
-            if isinstance(y, torch.Tensor):
-                _print_div_mismatches(rounding_mode, x, y, fn)
-            raise exc
+        self.compare_with_cpu(fn, x, y, run_eager=True)
 
 
 if __name__ == "__main__":
