@@ -4189,6 +4189,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     42,
                     torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0], dtype=torch.float16),
                 ),
+                "int_10": (
+                    10,
+                    torch.tensor([1.0, 10.0, 5.0, 10.0, 3.0], dtype=torch.float16),
+                ),
                 "float_3_5": (
                     3.5,
                     torch.tensor([1.0, 3.5, 2.5, 3.1, 5.0], dtype=torch.float16),
