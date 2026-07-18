@@ -287,6 +287,41 @@ def _rescale_stl_for_dtype(
     )
 
 
+def _resolve_aten_op(
+    op: Operation,
+    origin_node,
+    in_layout: "FixedLayout",
+    output: "FixedLayout",
+):
+    """Return the ATen op target for a single-arg pointwise kernel.
+
+    Normally the target is read directly from the origin FX node.  When the
+    kernel was emitted from inside another op's lowering (e.g. ``to_dtype``
+    called from ``_lower_eq``), the origin node belongs to the *outer* op, so
+    its target is wrong.  In that case we detect the real op by tracing
+    ``inner_fn``: if the sole compute operation is ``to_dtype`` and the input
+    and output dtypes differ in device size, we override the target to
+    ``prims.convert_element_type.default``.
+    """
+    aten_op = origin_node.target if origin_node is not None else None
+
+    if aten_op != prims.convert_element_type.default and not same_device_size(
+        in_layout.dtype, output.dtype
+    ):
+        from torch_spyre._inductor.split_multi_ops import (
+            _trace_inner_fn,
+            _get_compute_ops,
+        )
+
+        trace = _trace_inner_fn(op)
+        if trace is not None:
+            compute_ops = _get_compute_ops(trace)
+            if len(compute_ops) == 1 and compute_ops[0][0] == "to_dtype":
+                aten_op = prims.convert_element_type.default
+
+    return aten_op
+
+
 def _single_arg_op_layout(
     op: Operation,
     output: FixedLayout,
@@ -352,11 +387,11 @@ def _single_arg_op_layout(
                 layouts.append(out_stl)
 
         return layouts
-
     # Single-arg pointwise
     assert isinstance(data, Pointwise)
-    origin_node = next(iter(data.origins))
-    aten_op = origin_node.target
+    origin_node = next(iter(data.origins)) if data.origins else None
+    aten_op = _resolve_aten_op(op, origin_node, in_layout, output)
+
     match aten_op:
         case prims.convert_element_type.default if not same_device_size(
             in_layout.dtype, output.dtype
@@ -420,7 +455,6 @@ def _single_arg_op_layout(
             #    as the general (non-EA) convert path does.
             if fmt in STAGGERED_EAS or input_ea in STAGGERED_EAS:
                 return [_rescale_stl_for_dtype(stl, output.dtype, fmt)]
-
             # Dense reconstruction from the output host size. When the input
             # stick dim is unaligned, force a full input-stick depth so stick
             # padding is reflected in the device layout (see #1756 example above).
@@ -443,7 +477,6 @@ def _single_arg_op_layout(
             return [
                 _rescale_stl_for_dtype(stl, output.dtype, ElementArrangement.QFP8CH)
             ]
-
     in_coords = host_coordinates(in_layout, dep, None)
     out_coords = host_coordinates(output, output_dep, None)
     if (
@@ -461,7 +494,6 @@ def _single_arg_op_layout(
             stl.element_arrangement,
         )
         return [stl]
-
     in_device_coords = device_coordinates(stl, dep, None)
     stick_expr = in_device_coords[-1]
 

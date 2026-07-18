@@ -1266,6 +1266,110 @@ def lower_prod_dim(x, dim, keepdim=False):
     return with_int64_fallback(_prod_dim_impl, x)
 
 
+def _unstaggered_fp32_to_fp16(raw, orig_shape):
+    """Undo the shuffle that the Spyre fp32todl16 hardware instruction applies.
+
+    The fp32todl16 instruction writes its fp16 output in a shuffled order along
+    the last (stick) dimension: it interleaves pairs of 4-element groups,
+    placing even-indexed groups in the first half and odd-indexed groups in the
+    second half.  Concretely, for a 64-wide tile:
+
+      out[8k:8k+4]   ← in[4k:4k+4]      for k = 0 … 7
+      out[8k+4:8k+8] ← in[4k+32:4k+36]
+
+    When C > 64 the hardware applies this shuffle independently to each
+    64-element tile of the last dimension, so the unshuffle must also be
+    applied tile-by-tile.
+
+    When B == 1 (e.g. orig_shape = [1, 896]) the [C, 1] raw_permute buffer
+    would have a stick dimension of 1, which is too narrow.  In that case the
+    tensor is reshaped to [C // 64, 64] before the tile loop so each row of
+    raw_permute covers exactly one 64-element tile, then the result is
+    reshaped back to orig_shape at the end.
+
+    Sequence:
+      c = orig_shape[-1];  b = product(orig_shape[:-1])
+      if b == 1: reshape raw to [c // 64, 64]; b, c = c // 64, 64
+      raw2d       = view(raw, [b, c])                    → [B, C]
+      raw_permute = permute(raw2d, [-1, -2]).contiguous() → [C, B]
+      tile_size   = 64;  num_tiles = C // tile_size
+      For t in 0 … num_tiles-1:
+        tile_start = t * tile_size
+        For k in 0 … 7:
+          base = tile_start + 8 * k
+          low4_chunks[…]  = raw_permute[base   : base+4, :]  → [4, B]
+          high4_chunks[…] = raw_permute[base+4 : base+8, :]  → [4, B]
+      flat2d = cat(reordered_chunks, dim=0)               → [C, B]
+      output = view(permute(flat2d, [-1, -2]), orig_shape)
+
+    Args:
+        raw:        IR node for the raw (shuffled) cast output, any shape.
+        orig_shape: list of ints giving the original tensor shape.
+
+    Returns:
+        IR node with the unshuffle applied, reshaped back to orig_shape.
+    """
+    c = int(orig_shape[-1])
+    b = 1
+    for d in orig_shape[:-1]:
+        b *= int(d)
+
+    # Realize the lazy Pointwise cast node so we have a concrete buffer.
+    raw.realize()
+
+    # When B == 1 (e.g. [1, 896]) the permuted buffer would be [C, 1], which
+    # is too narrow for the tile logic.  Reshape to [C // 64, 64] so that each
+    # row of raw_permute covers exactly one 64-element tile, then restore
+    # orig_shape via view() at the end.
+    if b == 1:
+        b, c = c // 64, 64
+
+    raw2d = lowering.view(raw, [b, c])  # [B, C]
+
+    # Materialise a [C, B] copy by restickifying the permuted view.
+    # lower_restickify(permute(raw2d)) forces a concrete Pointwise node whose
+    # layout is resolved by propagate_spyre_tensor_layouts working backwards
+    # from the cat output (buf2), giving device_size=[1, 64, 64] as required.
+    # raw_permute = lower_restickify(lowering.permute(raw2d, [-1, -2]))  # [C, B]
+
+    raw_permute = clone(
+        lowering.permute(raw2d, [-1, 0]), memory_format=torch.contiguous_format
+    )
+    raw_permute.realize()
+
+    # Process each 64-element tile of C independently, then cat all chunks.
+    # For C=64: 1 tile (same behaviour as before).
+    # For C=128: 2 tiles of 64 rows each, unshuffled independently.
+    tile_size = 64
+    num_tiles = c // tile_size
+    groups_per_tile = tile_size // 8  # always 8
+
+    reordered_chunks = []
+    for t in range(num_tiles):
+        tile_start = t * tile_size
+        low4_chunks = []
+        high4_chunks = []
+        for k in range(groups_per_tile):
+            base = tile_start + 8 * k
+            low4_chunks.append(
+                lowering.slice_(raw_permute, dim=0, start=base, end=base + 4)
+            )
+            high4_chunks.append(
+                lowering.slice_(raw_permute, dim=0, start=base + 4, end=base + 8)
+            )
+        reordered_chunks.extend(low4_chunks + high4_chunks)
+
+    # Concatenate in the correct order → [C, B], then transpose back → [B, C],
+    # then restore orig_shape (handles the B==1 reshape-back case).
+    flat2d = lower_cat(reordered_chunks, dim=0)  # [C, B]
+    result = clone(
+        lowering.permute(flat2d, [-1, 0]), memory_format=torch.contiguous_format
+    )
+    return clone(
+        lowering.view(result, orig_shape), memory_format=torch.contiguous_format
+    )
+
+
 @register_spyre_lowering(
     torch.ops.aten.eq.Scalar,
     broadcast=True,
@@ -1280,40 +1384,33 @@ def lower_prod_dim(x, dim, keepdim=False):
 )
 def _lower_eq(x, y):
     """
-    Lower torch.eq operation for Spyre backend.
+    Lower torch.eq for Spyre backend.
 
-    Spyre performs equality comparisons in fp32, so int64 and fp32 inputs are
-    normalized to fp32 before comparison. The result is always cast to bool to
-    maintain PyTorch's aten.eq semantic contract.
+    For int64 inputs:  int64 → fp32 → eq → fp32 → fp16(bool)
+    For other inputs:  directly compute eq → fp16(bool)
     """
-    # Create pointwise comparison operation
+    # Convert int64 inputs to fp32.
+    if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
+        x = to_dtype(x, torch.float32)
+    if hasattr(y, "get_dtype") and y.get_dtype() == torch.int64:
+        y = to_dtype(y, torch.float32)
+
+    # x.realize()
+    # y.realize()
+
     fn: Callable[..., Any | ir.TensorBox] = lowering.make_pointwise(
         lambda a, b: lowering.ops.eq(a, b)
     )
 
-    def normalize_eq_arg(arg):
-        """
-        Normalize argument for fp32 comparison path.
-
-        Converts int64 tensors and int/float scalars to fp32 for comparison.
-        Returns the normalized argument.
-        """
-        # Handle tensor arguments
-        if hasattr(arg, "get_dtype"):
-            dtype = arg.get_dtype()
-            if dtype == torch.int64:
-                # Convert int64 tensors to fp32 for comparison
-                return to_dtype(arg, torch.float32)
-
-        # Other types (e.g., fp32 tensors, float scalars, fp16) pass through unchanged
-        return arg
-
-    # Normalize both operands
-    x_norm = normalize_eq_arg(x)
-    y_norm = normalize_eq_arg(y)
-
     # Perform comparison
-    result = fn(x_norm, y_norm)
+    result = fn(x, y)
     result.realize()
-    # Always cast result to bool to match aten.eq semantics
+
+    # Convert fp32 eq result to fp16 (Spyre's bool representation).
+    if hasattr(result, "get_dtype") and result.get_dtype() == torch.float32:
+        result_fp16 = _unstaggered_fp32_to_fp16(
+            to_dtype(result, torch.float16), list(x.get_size())
+        )
+        return to_dtype(result_fp16, torch.bool)
+
     return to_dtype(result, torch.bool)
