@@ -1123,7 +1123,17 @@ def to_dtype(x, dst_dtype):
         op = torch.ops.spyre.to_dtype_cpu.default
         return eager_fallback(op, x, dst_dtype)
 
-    return lowering.to_dtype(x, dst_dtype, copy=True)
+    result = lowering.to_dtype(x, dst_dtype, copy=True)
+
+    # A to_dtype called directly from another lowering has no convert_element_type FX node,
+    # so it inherits the caller's origin and the layout pass skips convert_element_type's
+    # layout propagation enforcement. Inject a synthetic origin so it fires.
+    args: tuple = ()
+    if isinstance(x, ir.IRNode) and (n := x.get_origin_node()) is not None:
+        args = (n,)
+    _ensure_synthetic_origin(result, torch.ops.prims.convert_element_type.default, args)
+
+    return result
 
 
 def with_int64_fallback(fn, *args, convert_output=True):
