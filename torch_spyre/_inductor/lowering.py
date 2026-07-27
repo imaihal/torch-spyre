@@ -1277,7 +1277,7 @@ def lower_prod_dim(x, dim, keepdim=False):
 
 
 def _unstaggered_fp32_to_fp16(raw, orig_shape):
-    """Undo the shuffle that the Spyre fp32todl16 hardware instruction applies.
+    """Undo the staggered that the Spyre fp32todl16 hardware instruction applies.
 
     The fp32todl16 instruction writes its fp16 output in a shuffled order along
     the last (stick) dimension: it interleaves pairs of 4-element groups,
@@ -1288,7 +1288,7 @@ def _unstaggered_fp32_to_fp16(raw, orig_shape):
       out[8k+4:8k+8] ← in[4k+32:4k+36]
 
     When C > 64 the hardware applies this shuffle independently to each
-    64-element tile of the last dimension, so the unshuffle must also be
+    64-element tile of the last dimension, so the unstaggered must also be
     applied tile-by-tile.
 
     When B == 1 (e.g. orig_shape = [1, 896]) the [C, 1] raw_permute buffer
@@ -1333,6 +1333,7 @@ def _unstaggered_fp32_to_fp16(raw, orig_shape):
     # orig_shape via view() at the end.
     if b == 1:
         b, c = c // 64, 64
+        # b, c = 2, c // 2
 
     raw2d = lowering.view(raw, [b, c])  # [B, C]
 
@@ -1353,7 +1354,6 @@ def _unstaggered_fp32_to_fp16(raw, orig_shape):
     tile_size = 64
     num_tiles = c // tile_size
     groups_per_tile = tile_size // 8  # always 8
-
     reordered_chunks = []
     for t in range(num_tiles):
         tile_start = t * tile_size
