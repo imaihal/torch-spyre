@@ -23,7 +23,7 @@ lx_planning: bool = os.environ.get("LX_PLANNING", "1") == "1"
 co_optimizing_lx_planning: bool = (
     os.environ.get("CO_OPTIMIZING_LX_PLANNING", "0") == "1"
 )
-hbm_planning: bool = _get_env_bool("SPYRE_INDUCTOR_MEMORY_PLAN", True)
+hbm_pool_planning: bool = _get_env_bool("HBM_POOL_PLANNING", True)
 
 global_stick_optimizer: bool = os.environ.get("GLOBAL_STICK_OPTIMIZER", "1") == "1"
 
@@ -88,11 +88,6 @@ core_id_k_fast_emission: bool = (
 # When False, HBM tensor addresses are baked as concrete integers
 # into the SDSC JSON and bundle.mlir emits sdsc_execute with no operands.
 bundle_symbolic_args: bool = os.environ.get("BUNDLE_SYMBOLIC_ARGS", "1") == "1"
-
-# When True, LoopSpec nodes are fully unrolled into flat OpSpecs before
-# generate_bundle runs.  When False (default), LoopSpecs are passed through
-# intact for the scf.for / affine.apply path.
-unroll_loops: bool = os.environ.get("UNROLL_LOOPS", "0") == "1"
 
 # Layout solver class used by default in scratchpad.allocator.ScratchpadAllocator.
 # Options:

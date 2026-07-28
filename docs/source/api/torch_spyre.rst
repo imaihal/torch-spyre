@@ -286,6 +286,28 @@ Profiler
    :doc:`../user_guide/profiling/index` for the current state and the
    profiling tooling that is available in the meantime.
 
+FFDC (First Failure Data Capture)
+---------------------------------
+
+.. function:: torch.spyre.get_diagnostic_report(output_dir=None) -> dict | None
+
+   Return the most recent FFDC diagnostic report, or ``None`` if no reports
+   exist. Reports are written automatically when a failure is captured and
+   ``USE_SPYRE_PROFILER=1`` is set.
+
+   Args:
+      output_dir: Directory to search. Defaults to
+         ``~/.cache/torch/inductor/torch-spyre/ffdc_reports`` (respecting
+         ``TORCHINDUCTOR_CACHE_DIR``), with a fallback to the system temp dir.
+
+   Example::
+
+      import torch
+
+      report = torch.spyre.get_diagnostic_report()
+      if report is not None:
+          print(report["failure"]["category"], report["failure"]["message"])
+
 Tensor Operations
 -----------------
 
@@ -592,8 +614,9 @@ Environment Variables
        ``scratchpad_planning`` pass)
    * - ``CO_OPTIMIZING_LX_PLANNING``
      - Use the co-optimizing LX allocator strategy (default ``0``)
-   * - ``SPYRE_INDUCTOR_MEMORY_PLAN``
-     - Enable HBM / device-buffer memory planning (default ``1``)
+   * - ``HBM_POOL_PLANNING``
+     - Enable HBM-pool planning for intermediates not in LX
+       (default ``1``)
    * - ``GLOBAL_STICK_OPTIMIZER``
      - Enable the global stick-dimension optimizer (default ``1``)
    * - ``SPYRE_CORE_ID_K_FAST_EMISSION``
