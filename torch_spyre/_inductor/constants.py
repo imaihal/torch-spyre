@@ -157,6 +157,9 @@ SPYRE_FP32_OPS = [
     "maximum",
     "minimum",
     "prod",
+    "greaterequal",
+    "lesserthan",
+    "where3",
 ]
 
 # Operations that directly handle FP8 dtypes (SEN143_FP8)

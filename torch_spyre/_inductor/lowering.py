@@ -14,6 +14,8 @@
 
 
 from contextlib import contextmanager
+from torch._inductor.ir import ShapeAsConstantBuffer, TensorBox
+from torch._inductor.ir import ShapeAsConstantBuffer, TensorBox
 from warnings import warn
 
 import sympy
@@ -71,7 +73,7 @@ def _current_fx_custom_meta() -> dict[str, Any]:
 def register_spyre_lowering(
     op,
     name=None,
-    broadcast=False,
+    broadcast=True,
     type_promotion_kind=lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
     override_return_dtype=None,
     convert_input_to_bool=False,
@@ -1365,6 +1367,59 @@ def lower_sub(x, y, *, alpha=1):
     return with_int64_fallback(lowering.sub, x, y)
 
 
+def _fp32_floordiv_correct(qf, xf, yf):
+    """Apply branch-free ±1 correction to an fp32 floor-quotient (Inductor IR).
+
+    Mirrors compile_floordiv_correction.py::_fp32_floordiv_correct but operates
+    on Inductor IR nodes instead of torch.Tensor objects.
+
+    After fp32 floor-division the remainder r = xf - qf*yf should lie in
+    [0, yf).  Spyre fp32 rounding can push it outside by one quotient unit:
+      r >= yf  →  qf was under-estimated by 1  →  qf += 1
+      r <  0   →  qf was over-estimated  by 1  →  qf -= 1
+
+    The ±1/0 constants are created with lower_full() WITHOUT calling .realize(),
+    so they remain unfused Pointwise nodes whose device_coordinates vary with c0
+    and get fused into the same kernel as qf/xf/yf.  Calling .realize() on them
+    (or passing a Python float literal to lowering.add/sub, which routes it through
+    SpyreConstantFallback) would produce a separate scalar buffer with
+    device_coordinates=[0,0], violating the DDL broadcast_ops.ddl slice-size
+    constraint.
+
+    Args:
+        qf: Inductor IR node — fp32 approximate quotient (= floor(xf / yf))
+        xf: Inductor IR node — fp32 dividend
+        yf: Inductor IR node — fp32 divisor
+
+    Returns:
+        Inductor IR node — fp32 corrected quotient
+    """
+
+    size = qf.get_size()
+    device = qf.get_device()
+
+    # r = xf - qf * yf
+    qf_yf = lowering.mul(qf, yf)
+    qf_yf.realize()
+    r = lowering.sub(xf, qf_yf)
+    r.realize()
+
+    # up-correction: if r >= yf, qf += 1
+    ge_cond = _lower_ge(r, yf)
+    ge_cond.realize()
+    qf1 = lowering.add(qf, 1.0)
+    qf1.realize()
+    qf_up = _lower_where(ge_cond, qf1, qf)
+    return qf_up
+    # down-correction: if r < 0, qf -= 1
+    lt_cond = _lower_lt(r, 0.0)
+    qf2 = lowering.sub(qf_up, 1.0)
+    qf2.realize()
+    qf_corrected = _lower_where(lt_cond, qf2, qf_up)
+
+    return qf_corrected
+
+
 @register_spyre_lowering(
     torch.ops.aten.div.Tensor,
     type_promotion_kind=None,
@@ -1400,20 +1455,30 @@ def lower_div(x, y, *, rounding_mode=None):
         # Truncated division (rounds toward zero): int64 -> fp32 -> divide -> trunc -> int64
         # Only supported for int64 inputs for now
         if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
-            return with_int64_fallback(lowering.div, x, y, convert_output=True)
+            result = with_int64_fallback(lowering.div, x, y, convert_output=False)
+            result.realize()
+            return to_dtype(lowering.trunc(result), torch.int64)
         else:
             raise Unsupported(
                 f"trunc rounding_mode only supports int64 tensors, but got {x.get_dtype()}"
             )
     elif rounding_mode == "floor":
         # Floor division (rounds toward -inf): int64 -> fp32 -> divide -> floor -> int64
-        # For int64: convert to fp32, divide, floor, convert back to int64
-        # For fp16/fp32: divide and floor, keep original dtype
-        result = with_int64_fallback(lowering.div, x, y, convert_output=False)
-        result.realize()  # materialize the fp32 buffer before the floor op
+        # For int64: convert to fp32, divide, apply fp32 correction, floor, convert back to int64.
+        # For fp16/fp32: divide and floor, keep original dtype (no correction needed).
+        is_int64_x = hasattr(x, "get_dtype") and x.get_dtype() == torch.int64
+        is_int64_y = hasattr(y, "get_dtype") and y.get_dtype() == torch.int64
+        xf = to_dtype(x, torch.float32) if is_int64_x else x
+        yf = to_dtype(y, torch.float32) if is_int64_y else y
+
+        # result = with_int64_fallback(lowering.div, x, y, convert_output=False)
+        result = lowering.div(xf, yf)
+        result.realize()  # materialize the raw fp32 quotient
         result = lowering.floor(result)
-        if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
-            result = to_dtype(result, torch.int64)
+        result.realize()
+        result = _fp32_floordiv_correct(result, xf, yf)
+        result.realize()
+        result = to_dtype(result, torch.int64) if is_int64_x else result
         return result
     else:
         raise Unsupported(f"Unsupported rounding_mode: {rounding_mode}")
@@ -1555,3 +1620,102 @@ def lower_c10d_wait_tensor_async(tensor):
             tensor,
         )
     )
+
+
+def _lower_comparison(op_name: str, x, y):
+    """Shared helper for binary comparison lowerings on Spyre.
+
+    Converts int64 inputs to fp32 (Spyre does not support int64 comparisons
+    natively), applies the named pointwise comparison op, and returns bool.
+
+    Args:
+        op_name: Spyre kernel op name string, e.g. ``"ge"``, ``"lt"``.
+        x, y:    Inductor IR tensors (or scalars after broadcast expansion).
+    """
+    if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
+        x = to_dtype(x, torch.float32)
+    if hasattr(y, "get_dtype") and y.get_dtype() == torch.int64:
+        y = to_dtype(y, torch.float32)
+
+    op_fn = lowering.ops_wrapper(op_name)
+    fn: Callable[..., Any | ir.TensorBox] = lowering.make_pointwise(
+        lambda a, b: op_fn(a, b)
+    )
+
+    result = fn(x, y)
+    result.realize()
+    return result
+    # return to_dtype(result, torch.bool)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.ge.Scalar,
+    broadcast=True,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+@register_spyre_lowering(
+    torch.ops.aten.ge.Tensor,
+    broadcast=True,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+def _lower_ge(x, y):
+    """Lower torch.ge (>=) for Spyre.  int64 → fp32 → ge → bool."""
+    return _lower_comparison("ge", x, y)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.lt.Scalar,
+    broadcast=True,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+@register_spyre_lowering(
+    torch.ops.aten.lt.Tensor,
+    broadcast=True,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+def _lower_lt(x, y):
+    """Lower torch.lt (<) for Spyre.  int64 → fp32 → lt → bool."""
+    return _lower_comparison("lt", x, y)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.where.self,
+    broadcast=True,
+    type_promotion_kind=None,
+)
+def _lower_where(condition, x, y):
+    """
+    Lower torch.where (aten.where.self) for Spyre backend.
+
+    Spyre's where3 op natively supports fp16 and fp32 operands
+    (SEN169_FP16 is always valid; fp32 is valid via SPYRE_FP32_OPS).
+    fp16 inputs are passed straight through.  Any other dtype (bool,
+    int64, …) is promoted to fp32.
+
+    The condition is kept in the same float domain to avoid a spurious
+    fp32→bool(fp16)→fp32 round-trip that would break kernel fusion when
+    a greaterequal/lesserthan result feeds directly into where3.
+    """
+    _FLOAT_DTYPES = (torch.float16, torch.float32)
+
+    def _ensure_float(t):
+        if hasattr(t, "get_dtype") and t.get_dtype() not in _FLOAT_DTYPES:
+            return to_dtype(t, torch.float32)
+        return t
+
+    # condition = _ensure_float(condition)
+    x = _ensure_float(x)
+    y = _ensure_float(y)
+
+    where_fn = lowering.ops_wrapper("where")
+    fn: Callable[..., Any | ir.TensorBox] = lowering.make_pointwise(
+        lambda c, a, b: where_fn(c, a, b)
+    )
+
+    result = fn(condition, x, y)
+    result.realize()
+    return result
