@@ -14,8 +14,6 @@
 
 
 from contextlib import contextmanager
-from torch._inductor.ir import ShapeAsConstantBuffer, TensorBox
-from torch._inductor.ir import ShapeAsConstantBuffer, TensorBox
 from warnings import warn
 
 import sympy
