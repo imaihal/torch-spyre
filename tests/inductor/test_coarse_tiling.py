@@ -20,16 +20,16 @@ Covers six areas, each in its own class group:
   2. coarse_tile IR pass: range rewriting, attribute stamping, nested groups
      (TestDivideRanges, TestCoarseTile, TestCoarseTileNested)
   3. CountedLoopSchedulerNode, build_loop_scheduler_nodes,
-     _tiled_syms_for_sched_node_at_depth, and spyre_fuse_nodes budget check
+     _tiled_syms_for_sched_node_at_depth, and spyre_fuse_nodes loop fusion
      (TestHelpers, TestBuildLoopSchedulerNodes, TestTiledSymsForSchedNode,
-      TestSpyreFuseNodesLoopBudget)
+      TestSpyreFuseNodesLoopFusion)
   4. generate_sdsc and compile_op_spec symbol/affine-stride paths
      (TestTiledByteStride, TestGenerateSdscTiledSymbols,
       TestCompileOpSpecTwoTiledSymbols, TestCompileOpSpecSymbolMapping)
   5. generate_bundle MLIR output: loop structure, affine maps, symbol constants
      (TestGenerateBundleMlir, TestFindUnimplemented,
       TestGenerateBundleMlirSnapshot, TestGenerateBundleMlirWithAffineStrides,
-      TestGenerateBundleNestedTiling, TestGenerateBundleUnrollPath)
+      TestGenerateBundleNestedTiling, TestGenerateBundleAffineLoopPath)
   6. Buffer propagation: consumer analysis helpers for insert_tiling_propagation
      (TestCoarseTileBufferPropagation)
 
@@ -47,6 +47,7 @@ from sympy import Integer, Mod, Symbol, floor, simplify, sympify  # noqa: F401
 
 import torch
 from torch import fx
+from torch._inductor import dependencies as inductor_deps
 from torch._inductor.utils import IndentedBuffer
 from torch.utils._ordered_set import OrderedSet
 
@@ -80,13 +81,13 @@ from torch_spyre._inductor.coarse_tile import (
     coarse_tile,
 )
 from torch_spyre._inductor.op_spec import LoopSpec, OpSpec, TensorArg, UnimplementedOp
+from torch_spyre._inductor.fusion import spyre_fuse_nodes
 from torch_spyre._inductor.scheduler import (
     CountedLoopSchedulerNode,
     _loop_count,
     _loop_group_id,
     build_loop_scheduler_nodes,
 )
-from torch_spyre._inductor.fusion import spyre_fuse_nodes
 from torch_spyre._inductor.spyre_kernel import (
     _codegen_op_spec_list,
     _iter_op_specs,
@@ -290,13 +291,24 @@ def _make_snode(scheduler, ir_op, name="buf0"):
     snode = MagicMock(spec=SchedulerNode)
     snode.scheduler = scheduler
     snode.node = ir_op
+    snode.get_device.return_value = torch.device("spyre")
     snode.get_name.return_value = name
     snode.get_nodes.return_value = [snode]
-    snode.ancestors = set()
+    snode.ancestors = OrderedSet()
     snode.min_order = 0
     snode.max_order = 0
-    snode.read_writes = MagicMock()
-    snode.read_writes.reads_and_writes.return_value = []
+    # PT 2.12 added min/max_input_distance to BaseSchedulerNode (set in __init__,
+    # so absent from MagicMock(spec=...)); init_group_node reads them when fusing.
+    snode.min_input_distance = 0
+    snode.max_input_distance = 0
+    snode.unmet_dependencies = OrderedSet()
+    snode.is_reduction.return_value = False
+    snode.group = (None, None)
+    snode.read_writes = inductor_deps.ReadWrites(
+        reads=OrderedSet(),
+        writes=OrderedSet(),
+        index_exprs=OrderedSet(),
+    )
     snode.outputs_by_name = {}
     return snode
 
@@ -979,6 +991,41 @@ class TestDivideRanges(unittest.TestCase):
         expected = SpyreTensorLayout([64], [1], torch.float16, [0])
         self.assertEqual(result, expected)
 
+    def test_resize_device_layout_transposed_same_size_dims(self):
+        """Issue #3116: two host dims of the same size in a transposed layout.
+
+        Flash-attention QK^T output: logical [B, H, Sq, Skv] with Sq == Skv,
+        stored transposed.  The device layout is byte-identical whether Sq or
+        Skv is the stick dim (device_size=[32,512,8,1,64],
+        stride_map=[512,16384,64,-1,1]), so size-based elimination cannot tell
+        the two size-512 host dims apart.
+
+        Without identity (``stick_host_dim=None``) this is genuinely ambiguous
+        and must raise.  With the authoritative stick host dim threaded in
+        (named-dim identity), it reconstructs correctly: tiling Sq 512 -> 256
+        shrinks the non-stick Sq device dim and leaves the transposed
+        stride_map / stick untouched.
+        """
+        from torch_spyre._C import SpyreTensorLayout
+        from torch_spyre._inductor.coarse_tile import _resize_device_layout
+
+        dev = SpyreTensorLayout([1, 1], torch.float16).device_dtype
+        # Transposed QK^T output: Skv (host dim 3) is the stick; Sq (host dim 2)
+        # is a non-stick dim of the same size (512), so they collide by size.
+        stl = SpyreTensorLayout([32, 512, 8, 1, 64], [512, 16384, 64, -1, 1], dev)
+        host_size = [1, 32, 512, 512]
+
+        # Fallback (no identity): size-based elimination is ambiguous -> raise.
+        with self.assertRaises(RuntimeError):
+            _resize_device_layout(stl, host_size, [1, 32, 256, 512])
+
+        # With authoritative stick host dim (Skv == host dim 3): unambiguous.
+        result = _resize_device_layout(
+            stl, host_size, [1, 32, 256, 512], stick_host_dim=3
+        )
+        self.assertEqual(list(result.device_size), [32, 256, 8, 1, 64])
+        self.assertEqual(list(result.stride_map), [512, 16384, 64, -1, 1])
+
 
 def _mock_op_out_coords(op):
     """Return pre-built coords stored on op by _make_hinted_op, or empty list."""
@@ -1255,145 +1302,96 @@ class TestBuildLoopSchedulerNodes(unittest.TestCase):
 
 
 # ===========================================================================
-# 3b. spyre_fuse_nodes CountedLoopSchedulerNode budget check
+# 3b. spyre_fuse_nodes — CountedLoopSchedulerNode fusion
 # ===========================================================================
 
 
-def _make_snode_with_tensors(scheduler, ir_op, name, tensor_names):
-    """Like _make_snode but read_writes returns named dependency mocks."""
-    snode = _make_snode(scheduler, ir_op, name)
-    deps = []
-    for tname in tensor_names:
-        dep = MagicMock()
-        dep.name = tname
-        deps.append(dep)
-    snode.read_writes.reads_and_writes.return_value = deps
-    return snode
-
-
-def _make_counted_loop_node(scheduler, tensor_names, name="loop0"):
-    """Return a fake CountedLoopSchedulerNode with the given tensor names."""
+def _make_counted_loop(scheduler, name="loop0", loop_count=sympy.Integer(4)):
+    """Return a MagicMock CountedLoopSchedulerNode for use in fusion tests."""
     node = MagicMock(spec=CountedLoopSchedulerNode)
     node.scheduler = scheduler
+    node.get_device.return_value = torch.device("spyre")
     node.get_name.return_value = name
     node.get_nodes.return_value = [node]
-    deps = []
-    for tname in tensor_names:
-        dep = MagicMock()
-        dep.name = tname
-        deps.append(dep)
-    node.read_writes = MagicMock()
-    node.read_writes.reads_and_writes.return_value = deps
+    node.loop_count = loop_count
+    node.ancestors = OrderedSet()
+    node.min_order = 0
+    node.max_order = 0
+    # PT 2.12 added min/max_input_distance to BaseSchedulerNode (set in __init__,
+    # so absent from MagicMock(spec=...)); init_group_node reads them when fusing.
+    node.min_input_distance = 0
+    node.max_input_distance = 0
+    node.unmet_dependencies = OrderedSet()
+    node.is_reduction.return_value = False
+    node.group = (None, None)
+    node.read_writes = inductor_deps.ReadWrites(
+        reads=OrderedSet(),
+        writes=OrderedSet(),
+        index_exprs=OrderedSet(),
+    )
+    node.outputs_by_name = {}
     return node
 
 
-class TestSpyreFuseNodesLoopBudget(unittest.TestCase):
-    def setUp(self):
-        # All tensor names count as non-intermediate.
-        self._patcher = patch(
-            "torch_spyre._inductor.fusion._is_non_intermediate",
-            side_effect=lambda name: True,
-        )
-        self._patcher.start()
-        # Cap the bundle at 2 tensors so overflow is easy to trigger.
-        self._max_patcher = patch(
-            "torch_spyre._inductor.fusion._max_bundle_tensors",
-            return_value=2,
-        )
-        self._max_patcher.start()
-
-    def tearDown(self):
-        self._patcher.stop()
-        self._max_patcher.stop()
-
-    def test_loop_node_within_budget_no_error(self):
-        """A loop node referencing <= max_tensors: passes through without error."""
+class TestSpyreFuseNodesLoopFusion(unittest.TestCase):
+    def test_lone_loop_node_is_own_bundle(self):
+        """A lone CountedLoopSchedulerNode produces exactly one bundle."""
         sched = _make_scheduler()
-        loop = _make_counted_loop_node(sched, ["t1", "t2"], "loop0")
+        loop = _make_counted_loop(sched, "loop0")
         result = spyre_fuse_nodes([loop])
         self.assertEqual(len(result), 1)
-        self.assertIs(result[0], loop)
+        self.assertIsInstance(result[0], CountedLoopSchedulerNode)
 
-    def test_loop_node_exceeds_budget_raises(self):
-        """A loop node referencing > max_tensors must raise RuntimeError."""
-        sched = _make_scheduler()
-        loop = _make_counted_loop_node(sched, ["t1", "t2", "t3"], "loop0")
-        with self.assertRaises(RuntimeError) as ctx:
-            spyre_fuse_nodes([loop])
-        self.assertIn("loop0", str(ctx.exception))
-        self.assertIn("3", str(ctx.exception))
-        self.assertIn("2", str(ctx.exception))
-
-    def test_loop_node_empty_tensors_no_error(self):
-        """A loop node with no tensors (all intermediates) is fine."""
-        sched = _make_scheduler()
-        # Override: nothing is non-intermediate for this test.
-        with patch(
-            "torch_spyre._inductor.fusion._is_non_intermediate",
-            side_effect=lambda name: False,
-        ):
-            loop = _make_counted_loop_node(sched, ["t1", "t2", "t3"], "loop0")
-            result = spyre_fuse_nodes([loop])
-        self.assertEqual(len(result), 1)
-
-    def test_plain_scheduler_node_split_unaffected(self):
-        """Plain SchedulerNode tensor-budget splits still work (no regression)."""
-        sched = _make_scheduler()
-        a = _make_snode_with_tensors(sched, _make_ir_op(), "a", ["t1", "t2"])
-        b = _make_snode_with_tensors(sched, _make_ir_op(), "b", ["t3"])
-        # a fills the 2-tensor budget; b starts a new bundle.
-        result = spyre_fuse_nodes([a, b])
-        self.assertEqual(len(result), 2)
-
-    def test_loop_node_preceded_by_scheduler_nodes(self):
-        """Loop node after plain nodes: budget check on loop node itself."""
-        sched = _make_scheduler()
-        a = _make_snode_with_tensors(sched, _make_ir_op(), "a", ["t1"])
-        loop = _make_counted_loop_node(sched, ["t2", "t3", "t4"], "loop0")
-        with self.assertRaises(RuntimeError):
-            spyre_fuse_nodes([a, loop])
-
-    def test_fallback_node_exceeds_budget_no_error(self):
-        """Non-CountedLoop nodes (e.g. FallbackKernel) bypass the budget check."""
+    def test_plain_then_loop_fuses_into_one_bundle(self):
+        """SchedulerNode followed by CountedLoopSchedulerNode → one FusedSchedulerNode."""
         from torch._inductor.scheduler import FusedSchedulerNode
 
         sched = _make_scheduler()
-        # Build a plain FusedSchedulerNode mock (not CountedLoopSchedulerNode).
-        node = MagicMock(spec=FusedSchedulerNode)
-        node.scheduler = sched
-        node.get_name.return_value = "fallback0"
-        deps = []
-        for tname in ["t1", "t2", "t3", "t4"]:
-            dep = MagicMock()
-            dep.name = tname
-            deps.append(dep)
-        node.read_writes = MagicMock()
-        node.read_writes.reads_and_writes.return_value = deps
-        # 4 tensors > max_tensors(2), but this is not a CountedLoopSchedulerNode.
-        result = spyre_fuse_nodes([node])
+        plain = _make_snode(sched, _make_ir_op(), "plain0")
+        loop = _make_counted_loop(sched, "loop0")
+        result = spyre_fuse_nodes([plain, loop])
         self.assertEqual(len(result), 1)
-        self.assertIs(result[0], node)
+        self.assertIsInstance(result[0], FusedSchedulerNode)
 
-    def test_nested_loop_node_tensor_union_checked(self):
-        """Outer CountedLoopSchedulerNode's read_writes covers inner tensors.
+    def test_loop_then_plain_fuses_into_one_bundle(self):
+        """CountedLoopSchedulerNode followed by SchedulerNode → one FusedSchedulerNode."""
+        from torch._inductor.scheduler import FusedSchedulerNode
 
-        _build_loop_group wraps inner loops first, then the outer loop.
-        FusedSchedulerNode.__init__ calls ReadWrites.merge_list on its
-        snodes, so the outer node's read_writes is already the full union
-        of all inner tensors.  This test confirms that the budget check
-        on the outer node sees all tensors from nested inner nodes.
-        """
         sched = _make_scheduler()
-        # Simulate an outer CountedLoopSchedulerNode whose read_writes
-        # already aggregates tensors from two inner loop nodes (t1..t4).
-        # In production this aggregation is done by ReadWrites.merge_list
-        # during FusedSchedulerNode construction.
-        outer = _make_counted_loop_node(sched, ["t1", "t2", "t3", "t4"], "outer_loop")
-        # 4 unique non-intermediate tensors > max_tensors(2): must raise.
-        with self.assertRaises(RuntimeError) as ctx:
-            spyre_fuse_nodes([outer])
-        self.assertIn("outer_loop", str(ctx.exception))
-        self.assertIn("4", str(ctx.exception))
+        loop = _make_counted_loop(sched, "loop0")
+        plain = _make_snode(sched, _make_ir_op(), "plain0")
+        result = spyre_fuse_nodes([loop, plain])
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], FusedSchedulerNode)
+
+    def test_plain_loop_plain_fuses_into_one_bundle(self):
+        """plain → loop → plain sequence → one FusedSchedulerNode."""
+        from torch._inductor.scheduler import FusedSchedulerNode
+
+        sched = _make_scheduler()
+        plain_a = _make_snode(sched, _make_ir_op(), "plain_a")
+        loop = _make_counted_loop(sched, "loop0")
+        plain_b = _make_snode(sched, _make_ir_op(), "plain_b")
+        result = spyre_fuse_nodes([plain_a, loop, plain_b])
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], FusedSchedulerNode)
+
+    def test_fallback_still_forces_boundary(self):
+        """An ExternKernelSchedulerNode between two fusable nodes creates two bundles."""
+        from torch._inductor.scheduler import ExternKernelSchedulerNode
+
+        sched = _make_scheduler()
+        plain_a = _make_snode(sched, _make_ir_op(), "plain_a")
+        fallback = MagicMock(spec=ExternKernelSchedulerNode)
+        fallback.scheduler = sched
+        fallback.get_name.return_value = "fallback0"
+        plain_b = _make_snode(sched, _make_ir_op(), "plain_b")
+        result = spyre_fuse_nodes([plain_a, fallback, plain_b])
+        # plain_a fuses alone before fallback; fallback forces boundary;
+        # plain_b is a separate bundle after fallback.
+        self.assertEqual(len(result), 3)
+        # First entry is plain_a (single SchedulerNode, returned as-is by _make_fused).
+        self.assertIs(result[1], fallback)
 
 
 # ===========================================================================
@@ -1416,8 +1414,8 @@ class TestTiledByteStride(unittest.TestCase):
             start_address=0,
             backGap={},
         )
-        stride = _tiled_byte_stride(tensor, s, {s: 64})
-        self.assertEqual(stride, 64 * 128 * 2)
+        stride = _tiled_byte_stride(tensor, s)
+        self.assertEqual(stride, 128 * 2)
 
     def test_fp16_larger_stride(self):
         s = Symbol("s")
@@ -1433,8 +1431,8 @@ class TestTiledByteStride(unittest.TestCase):
             start_address=0,
             backGap={},
         )
-        stride = _tiled_byte_stride(tensor, s, {s: 32})
-        self.assertEqual(stride, 32 * 512 * 2)
+        stride = _tiled_byte_stride(tensor, s)
+        self.assertEqual(stride, 512 * 2)
 
     def test_stride_one(self):
         s = Symbol("s")
@@ -1450,8 +1448,8 @@ class TestTiledByteStride(unittest.TestCase):
             start_address=0,
             backGap={},
         )
-        stride = _tiled_byte_stride(tensor, s, {s: 16})
-        self.assertEqual(stride, 16 * 1 * 2)
+        stride = _tiled_byte_stride(tensor, s)
+        self.assertEqual(stride, 1 * 2)
 
 
 class TestGenerateSdscTiledSymbols(unittest.TestCase):
@@ -1471,7 +1469,7 @@ class TestGenerateSdscTiledSymbols(unittest.TestCase):
         # With one tiling level, affine_strides[0] = [{s: stride}].
         self.assertEqual(len(affine_strides), 1)
         self.assertIn(s, affine_strides[0][0])
-        self.assertEqual(affine_strides[0][0][s], 64 * 128 * 2)
+        self.assertEqual(affine_strides[0][0][s], 128 * 2)
 
     def test_tiled_tensor_base_address_registered(self):
         s = Symbol("s")
@@ -1689,9 +1687,7 @@ class TestCompileOpSpecSymbolMapping(unittest.TestCase):
         op_spec = _make_tiled_op_spec()
         loop = LoopSpec(count=Integer(4), body=[op_spec])
         tmpdir = tempfile.mkdtemp()
-        generate_bundle(
-            "test_kernel", tmpdir, [loop], unroll_loops=False, use_symbols=True
-        )
+        generate_bundle("test_kernel", tmpdir, [loop], use_symbols=True)
 
         with open(os.path.join(tmpdir, "bundle.mlir")) as f:
             mlir = f.read()
@@ -1783,6 +1779,63 @@ class TestSharedWeightUnitBmmLayout(unittest.TestCase):
             ["mb", "out", "x"],
         )
 
+    def test_unit_bmm_preserve_skips_higher_rank_attention_layout(self):
+        c0 = Symbol("c0")
+        c1 = Symbol("c1")
+        c2 = Symbol("c2")
+        z0 = Symbol("z0")
+        input_arg = TensorArg(
+            is_input=True,
+            arg_index=0,
+            device_dtype=_FP16,
+            device_size=[512, 32, 2, 1, 64],
+            device_coordinates=[
+                c0,
+                z0,
+                floor(c2 / 64),
+                Integer(0),
+                Mod(c2, 64),
+            ],
+            allocation={"hbm_pool": 0},
+        )
+        kernel_arg = TensorArg(
+            is_input=True,
+            arg_index=1,
+            device_dtype=_FP16,
+            device_size=[64, 4096, 64],
+            device_coordinates=[floor(c1 / 64), c2, Mod(c1, 64)],
+            allocation={"hbm": 0x400000000},
+        )
+        output_arg = TensorArg(
+            is_input=False,
+            arg_index=2,
+            device_dtype=_FP16,
+            device_size=[512, 64, 1, 64],
+            device_coordinates=[c0, floor(c1 / 64), Integer(0), Mod(c1, 64)],
+            allocation={"hbm": 0x800000000},
+        )
+        iteration_space = {
+            c0: (Integer(512), 4),
+            c1: (Integer(4096), 8),
+            c2: (Integer(4096), 1),
+        }
+        op_info = {SHARED_WEIGHT_UNIT_BMM_INFO_KEY: {"batch_dim": 0}}
+
+        new_iteration_space = _preserve_shared_weight_unit_bmm_dim(
+            "batchmatmul",
+            iteration_space,
+            [input_arg, kernel_arg, output_arg],
+            op_info,
+        )
+
+        self.assertIs(new_iteration_space, iteration_space)
+        self.assertNotIn("_spyre_bmm_unit", {str(dim) for dim in iteration_space})
+        self.assertEqual(input_arg.device_size, [512, 32, 2, 1, 64])
+        self.assertEqual(
+            input_arg.device_coordinates,
+            [c0, z0, floor(c2 / 64), Integer(0), Mod(c2, 64)],
+        )
+
     def test_shared_weight_marker_requires_stick_aligned_dims(self):
         m, k, n = 2, 128, 64
         self.assertEqual(
@@ -1840,7 +1893,7 @@ class TestGenerateBundleMlir(unittest.TestCase):
         self.patch.stop()
 
     def _bundle(self, specs):
-        generate_bundle("test_kernel", self.tmpdir, specs, unroll_loops=False)
+        generate_bundle("test_kernel", self.tmpdir, specs)
         return _read_mlir(self.tmpdir)
 
     def test_flat_ops_no_loop(self):
@@ -1898,7 +1951,7 @@ class TestGenerateBundleMlir(unittest.TestCase):
         a = _make_minimal_op_spec("a")
         b = _make_minimal_op_spec("b")
         loop = LoopSpec(count=Integer(2), body=[a, b])
-        generate_bundle("test_kernel", self.tmpdir, [loop], unroll_loops=False)
+        generate_bundle("test_kernel", self.tmpdir, [loop])
         written = sorted(f for f in os.listdir(self.tmpdir) if f.endswith(".json"))
         self.assertEqual(len(written), 2)
 
@@ -1971,7 +2024,7 @@ class TestGenerateBundleMlirSnapshot(unittest.TestCase):
         self.patch.stop()
 
     def _bundle(self, specs):
-        generate_bundle("test_kernel", self.tmpdir, specs, unroll_loops=False)
+        generate_bundle("test_kernel", self.tmpdir, specs)
         return _read_mlir(self.tmpdir)
 
     def test_single_loop_snapshot(self):
@@ -2021,7 +2074,6 @@ class TestGenerateBundleMlirWithAffineStrides(unittest.TestCase):
                 "test_kernel",
                 self.tmpdir,
                 specs,
-                unroll_loops=False,
                 use_symbols=True,
             )
         return _read_mlir(self.tmpdir)
@@ -2150,7 +2202,6 @@ class TestGenerateBundleNestedTiling(unittest.TestCase):
                 "test_kernel",
                 self.tmpdir,
                 specs,
-                unroll_loops=False,
                 use_symbols=True,
             )
         return _read_mlir(self.tmpdir)
@@ -2234,13 +2285,8 @@ class TestGenerateBundleNestedTiling(unittest.TestCase):
         self.assertEqual(mlir, expected)
 
 
-class TestGenerateBundleUnrollPath(unittest.TestCase):
-    """Verify affine-map correctness for the unroll_loops=False path.
-
-    One test group per scenario covered by test_unroll_loop_specs.py:
-      Group 1 — flat row-tiling         (mirrors TestUnrollLoopSpecs)
-      Group 2 — nested outer-B/inner-K reduction  (mirrors TestNestedReductionUnroll)
-      Group 3 — tile-accum copy pattern (mirrors TestNestedReductionTileAccum)
+class TestGenerateBundleAffineLoopPath(unittest.TestCase):
+    """Verify affine-map correctness for the scf.for / affine.apply path.
 
     Key invariants:
       - ops tiled only by the inner loop var emit affine.apply with that var only
@@ -2263,7 +2309,6 @@ class TestGenerateBundleUnrollPath(unittest.TestCase):
                 "test_kernel",
                 self.tmpdir,
                 specs,
-                unroll_loops=False,
                 use_symbols=True,
             )
         return _read_mlir(self.tmpdir)
@@ -2334,7 +2379,8 @@ class TestGenerateBundleUnrollPath(unittest.TestCase):
 
     # --- Group 2: nested outer-B + inner-K reduction ---
     #
-    # Strides match TestNestedReductionUnroll in test_unroll_loop_specs.py:
+    # Strides match the geometry previously verified against the deleted
+    # flat-unroll path's TestNestedReductionUnroll:
     #   k_input: device_size=[2,64,64]; device_stride[0]=prod([64,64])=4096
     #     128 K-elems/tile → 2 sticks; byte_stride = (128//64)*4096*2 = 16384
     #   accum_buf: device_size=[1,2,64]; device_stride[1]=prod([64])=64
@@ -2434,7 +2480,8 @@ class TestGenerateBundleUnrollPath(unittest.TestCase):
 
     # --- Group 3: tile-accum copy pattern ---
     #
-    # Strides match TestNestedReductionTileAccum in test_unroll_loop_specs.py:
+    # Strides match the geometry previously verified against the deleted
+    # flat-unroll path's TestNestedReductionTileAccum:
     #   bmm K-input: same geometry as Group 2 → K_STRIDE = 16384
     #   accum_full (copy output): device_size=[1,128,32]
     #     device_stride[0]=prod([128,32])=4096; 1 tile advances c_b by 1
@@ -3096,7 +3143,6 @@ class TestGenerateBundleMlirSymbolicArgs(unittest.TestCase):
                 "test_kernel",
                 self.tmpdir,
                 specs,
-                unroll_loops=False,
                 use_symbols=use_symbols,
             )
         return _read_mlir(self.tmpdir)
@@ -3543,7 +3589,6 @@ class TestSymbolKind(unittest.TestCase):
                 "test_kernel",
                 self.tmpdir,
                 [a, b],
-                unroll_loops=False,
                 use_symbols=True,
             )
         mlir = _read_mlir(self.tmpdir)
