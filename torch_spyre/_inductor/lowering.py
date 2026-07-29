@@ -1395,9 +1395,6 @@ def _fp32_floordiv_correct(qf, xf, yf):
         Inductor IR node — fp32 corrected quotient
     """
 
-    size = qf.get_size()
-    device = qf.get_device()
-
     # r = xf - qf * yf
     qf_yf = lowering.mul(qf, yf)
     qf_yf.realize()
