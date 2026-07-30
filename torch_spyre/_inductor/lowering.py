@@ -1455,20 +1455,12 @@ def lower_sub(x, y, *, alpha=1):
 
 
 def _correct_floordiv_quotient(qf, xf, yf):
-    """Apply branch-free ±1 correction to a floor-quotient (Inductor IR).
+    """Apply ±1 correction to a floor-quotient.
 
     After floor-division the remainder r = xf - qf*yf should lie in
     [0, yf).  Rounding error can push it outside by one quotient unit:
       r >= yf  →  qf was under-estimated by 1  →  qf += 1
       r <  0   →  qf was over-estimated  by 1  →  qf -= 1
-
-    Args:
-        qf: Inductor IR node — approximate quotient (= floor(xf / yf))
-        xf: Inductor IR node — dividend
-        yf: Inductor IR node — divisor
-
-    Returns:
-        Inductor IR node — corrected quotient
     """
 
     # r = xf - qf * yf
@@ -1479,7 +1471,6 @@ def _correct_floordiv_quotient(qf, xf, yf):
 
     # up-correction: if r >= yf, qf += 1
     ge_cond = _lower_ge(r, yf)
-    ge_cond.realize()
     qf1 = lowering.add(qf, 1.0)
     qf1.realize()
     qf_up = lowering.where(ge_cond, qf1, qf)
@@ -1487,7 +1478,6 @@ def _correct_floordiv_quotient(qf, xf, yf):
 
     # down-correction: if r < 0, qf -= 1
     lt_cond = _lower_lt(r, 0.0)
-    lt_cond.realize()
     qf2 = lowering.sub(qf_up, 1.0)
     qf2.realize()
     qf_corrected = lowering.where(lt_cond, qf2, qf_up)
@@ -1720,6 +1710,7 @@ def _lower_comparison(op_name: str, x, y):
     result.realize()
     if result.dtype == torch.float16:
         result = to_dtype(result, torch.bool)
+        result.realize()
     return result
 
 
