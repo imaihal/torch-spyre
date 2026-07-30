@@ -1454,32 +1454,21 @@ def lower_sub(x, y, *, alpha=1):
     return with_int64_fallback(lowering.sub, x, y)
 
 
-def _fp32_floordiv_correct(qf, xf, yf):
-    """Apply branch-free ±1 correction to an fp32 floor-quotient (Inductor IR).
+def _correct_floordiv_quotient(qf, xf, yf):
+    """Apply branch-free ±1 correction to a floor-quotient (Inductor IR).
 
-    Mirrors compile_floordiv_correction.py::_fp32_floordiv_correct but operates
-    on Inductor IR nodes instead of torch.Tensor objects.
-
-    After fp32 floor-division the remainder r = xf - qf*yf should lie in
-    [0, yf).  Spyre fp32 rounding can push it outside by one quotient unit:
+    After floor-division the remainder r = xf - qf*yf should lie in
+    [0, yf).  Rounding error can push it outside by one quotient unit:
       r >= yf  →  qf was under-estimated by 1  →  qf += 1
       r <  0   →  qf was over-estimated  by 1  →  qf -= 1
 
-    The ±1/0 constants are created with lower_full() WITHOUT calling .realize(),
-    so they remain unfused Pointwise nodes whose device_coordinates vary with c0
-    and get fused into the same kernel as qf/xf/yf.  Calling .realize() on them
-    (or passing a Python float literal to lowering.add/sub, which routes it through
-    SpyreConstantFallback) would produce a separate scalar buffer with
-    device_coordinates=[0,0], violating the DDL broadcast_ops.ddl slice-size
-    constraint.
-
     Args:
-        qf: Inductor IR node — fp32 approximate quotient (= floor(xf / yf))
-        xf: Inductor IR node — fp32 dividend
-        yf: Inductor IR node — fp32 divisor
+        qf: Inductor IR node — approximate quotient (= floor(xf / yf))
+        xf: Inductor IR node — dividend
+        yf: Inductor IR node — divisor
 
     Returns:
-        Inductor IR node — fp32 corrected quotient
+        Inductor IR node — corrected quotient
     """
 
     # r = xf - qf * yf
@@ -1562,7 +1551,7 @@ def lower_div(x, y, *, rounding_mode=None):
         result.realize()  # materialize the raw fp32 quotient
         result = lowering.floor(result)
         result.realize()
-        result = _fp32_floordiv_correct(result, xf, yf)
+        result = _correct_floordiv_quotient(result, xf, yf)
         result.realize()
         result = to_dtype(result, torch.int64) if is_int64_x else result
         return result
