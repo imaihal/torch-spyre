@@ -1404,14 +1404,16 @@ def _fp32_floordiv_correct(qf, xf, yf):
     ge_cond.realize()
     qf1 = lowering.add(qf, 1.0)
     qf1.realize()
-    qf_up = _lower_where(ge_cond, qf1, qf)
-    return qf_up
+    qf_up = lowering.where(ge_cond, qf1, qf)
+    qf_up.realize()
+
     # down-correction: if r < 0, qf -= 1
     lt_cond = _lower_lt(r, 0.0)
+    lt_cond.realize()
     qf2 = lowering.sub(qf_up, 1.0)
     qf2.realize()
-    qf_corrected = _lower_where(lt_cond, qf2, qf_up)
-
+    qf_corrected = lowering.where(lt_cond, qf2, qf_up)
+    qf_corrected.realize()
     return qf_corrected
 
 
@@ -1639,8 +1641,9 @@ def _lower_comparison(op_name: str, x, y):
 
     result = fn(x, y)
     result.realize()
+    if result.dtype == torch.float16:
+        result = to_dtype(result, torch.bool)
     return result
-    # return to_dtype(result, torch.bool)
 
 
 @register_spyre_lowering(
@@ -1677,6 +1680,7 @@ def _lower_lt(x, y):
     return _lower_comparison("lt", x, y)
 
 
+'''
 @register_spyre_lowering(
     torch.ops.aten.where.self,
     broadcast=True,
@@ -1714,3 +1718,4 @@ def _lower_where(condition, x, y):
     result = fn(condition, x, y)
     result.realize()
     return result
+'''
