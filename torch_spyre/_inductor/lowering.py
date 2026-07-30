@@ -1538,17 +1538,16 @@ def lower_div(x, y, *, rounding_mode=None):
                 f"trunc rounding_mode only supports int64 tensors, but got {x.get_dtype()}"
             )
     elif rounding_mode == "floor":
-        # Floor division (rounds toward -inf): int64 -> fp32 -> divide -> floor -> int64
-        # For int64: convert to fp32, divide, apply fp32 correction, floor, convert back to int64.
-        # For fp16/fp32: divide and floor, keep original dtype (no correction needed).
+        # Floor division (rounds toward -inf).
+        # For int64: convert to fp32, divide, floor, correct, convert back to int64.
+        # For fp16/fp32: divide, floor, correct, keep original dtype.
         is_int64_x = hasattr(x, "get_dtype") and x.get_dtype() == torch.int64
         is_int64_y = hasattr(y, "get_dtype") and y.get_dtype() == torch.int64
         xf = to_dtype(x, torch.float32) if is_int64_x else x
         yf = to_dtype(y, torch.float32) if is_int64_y else y
 
-        # result = with_int64_fallback(lowering.div, x, y, convert_output=False)
         result = lowering.div(xf, yf)
-        result.realize()  # materialize the raw fp32 quotient
+        result.realize()
         result = lowering.floor(result)
         result.realize()
         result = _correct_floordiv_quotient(result, xf, yf)
