@@ -854,22 +854,39 @@ def spyre_prod_dim_int(
 
 @register_spyre_decompositions([torch.ops.aten.add.Tensor, torch.ops.aten.add.Scalar])
 def spyre_add(x: torch.Tensor, y, *, alpha=1) -> torch.Tensor:
-    """Decompose aten.add for int64 tensors on Spyre (int64 → fp32 → add → int64).
+    """Decompose aten.add for Spyre.
 
-    For non-int64 inputs, returns NotImplemented so the default in-tree lowering
-    handles fp16/fp32 natively.  y may be a Tensor or a Python scalar.
+    - int64: converts to fp32, adds (with alpha scaling), converts back to int64.
+    - fp16/fp32 with alpha != 1: scales y by alpha in the input dtype, then adds,
+      to prevent the in-tree lowering from applying unwanted type promotion.
+    - fp16/fp32 with alpha == 1: returns NotImplemented so the in-tree lowering
+      handles it natively without interference.
+
+    y may be a Tensor or a Python scalar.
     """
-    if x.dtype != torch.int64:
-        return NotImplemented
-    xf = torch.ops.prims.convert_element_type(x, torch.float32)
-    if isinstance(y, torch.Tensor):
-        yf = torch.ops.prims.convert_element_type(y, torch.float32)
-    else:
-        yf = float(y)
+    is_int64 = x.dtype == torch.int64
+
+    if is_int64:
+        xf = torch.ops.prims.convert_element_type(x, torch.float32)
+        if isinstance(y, torch.Tensor):
+            yf = torch.ops.prims.convert_element_type(y, torch.float32)
+        else:
+            yf = float(y)
+        if alpha != 1:
+            yf = yf * float(alpha)
+        result = torch.ops.aten.add.Tensor(xf, yf)
+        return torch.ops.prims.convert_element_type(result, torch.int64)
+
     if alpha != 1:
-        yf = yf * float(alpha)
-    result = torch.ops.aten.add.Tensor(xf, yf)
-    return torch.ops.prims.convert_element_type(result, torch.int64)
+        # For fp16/fp32: scale y by alpha first to avoid type-promotion side-effects
+        # from the in-tree lowering's alpha handling.
+        if isinstance(y, torch.Tensor):
+            y = torch.ops.aten.mul.Tensor(y, float(alpha))
+        else:
+            y = float(y) * float(alpha)
+        return torch.ops.aten.add.Tensor(x, y)
+
+    return NotImplemented
 
 
 @register_spyre_decompositions([torch.ops.aten.mul.Tensor, torch.ops.aten.mul.Scalar])
@@ -891,21 +908,39 @@ def spyre_mul(x: torch.Tensor, y) -> torch.Tensor:
 
 @register_spyre_decompositions([torch.ops.aten.sub.Tensor, torch.ops.aten.sub.Scalar])
 def spyre_sub(x: torch.Tensor, y, *, alpha=1) -> torch.Tensor:
-    """Decompose aten.sub for int64 tensors on Spyre (int64 → fp32 → sub → int64).
+    """Decompose aten.sub for Spyre.
 
-    For non-int64 inputs, returns NotImplemented.  y may be a Tensor or scalar.
+    - int64: converts to fp32, subtracts (with alpha scaling), converts back to int64.
+    - fp16/fp32 with alpha != 1: scales y by alpha in the input dtype, then subtracts,
+      to prevent the in-tree lowering from applying unwanted type promotion.
+    - fp16/fp32 with alpha == 1: returns NotImplemented so the in-tree lowering
+      handles it natively without interference.
+
+    y may be a Tensor or a Python scalar.
     """
-    if x.dtype != torch.int64:
-        return NotImplemented
-    xf = torch.ops.prims.convert_element_type(x, torch.float32)
-    if isinstance(y, torch.Tensor):
-        yf = torch.ops.prims.convert_element_type(y, torch.float32)
-    else:
-        yf = float(y)
+    is_int64 = x.dtype == torch.int64
+
+    if is_int64:
+        xf = torch.ops.prims.convert_element_type(x, torch.float32)
+        if isinstance(y, torch.Tensor):
+            yf = torch.ops.prims.convert_element_type(y, torch.float32)
+        else:
+            yf = float(y)
+        if alpha != 1:
+            yf = yf * float(alpha)
+        result = torch.ops.aten.sub.Tensor(xf, yf)
+        return torch.ops.prims.convert_element_type(result, torch.int64)
+
     if alpha != 1:
-        yf = yf * float(alpha)
-    result = torch.ops.aten.sub.Tensor(xf, yf)
-    return torch.ops.prims.convert_element_type(result, torch.int64)
+        # For fp16/fp32: scale y by alpha first to avoid type-promotion side-effects
+        # from the in-tree lowering's alpha handling.
+        if isinstance(y, torch.Tensor):
+            y = torch.ops.aten.mul.Tensor(y, float(alpha))
+        else:
+            y = float(y) * float(alpha)
+        return torch.ops.aten.sub.Tensor(x, y)
+
+    return NotImplemented
 
 
 @register_spyre_decompositions([torch.ops.aten.minimum.default])
