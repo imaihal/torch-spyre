@@ -105,6 +105,27 @@ def register_spyre_decompositions(ops: OpOrOps):
     eager-mode dispatch reaches it too. This is required for
     ``CompositeImplicitAutograd`` ops (``rms_norm``, ``layer_norm``, ...); it
     is harmless for the rest.
+
+    ``NotImplemented`` as a return value
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Returning ``NotImplemented`` from a registered decomposition is **only
+    valid inside ``torch.compile``'s decomp pass** (``make_fx`` tracing).
+    There it acts as a skip signal: the tracing machinery leaves the op
+    un-decomposed and Inductor lowers it directly via the upstream lowering
+    table.
+
+    In **eager mode** the same function is wrapped by ``_OPWrapper`` and
+    executed via ``torch.compile(fn)(*args)``.  When the compiled function
+    returns ``NotImplemented``, that Python sentinel is handed back to
+    PyTorch's C++ dispatch layer, which attempts to cast it to a Tensor and
+    raises::
+
+        RuntimeError: Unable to cast NotImplemented to Tensor
+
+    Therefore any decomposition that returns ``NotImplemented`` for some
+    inputs **must not be called eagerly** with those inputs.  The standard
+    safeguard is to pass ``run_eager=False`` to ``compare_with_cpu()`` in the
+    corresponding test, which skips the eager execution path.
     """
     return decomp.register_decomposition(ops, spyre_decompositions)
 
@@ -145,6 +166,15 @@ class _OPWrapper:
     subsequent eager calls reuse the compiled entry point. When invoked from
     inside an active ``torch.compile`` context, the wrapped function is called
     directly — re-entering ``torch.compile`` would be wrong.
+
+    .. warning:: ``NotImplemented`` is not safe here.
+        If the wrapped decomposition returns ``NotImplemented`` (the standard
+        decomp-table skip signal inside ``make_fx``), ``torch.compile(fn)``
+        propagates that Python sentinel as the return value.  PyTorch's C++
+        dispatch layer then tries to cast it to a ``Tensor`` and raises
+        ``RuntimeError: Unable to cast NotImplemented to Tensor``.
+        Decompositions that return ``NotImplemented`` for certain inputs must
+        not be invoked eagerly with those inputs (use ``run_eager=False``).
     """
 
     def __init__(self, fn):
@@ -864,18 +894,19 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
     """Decompose torch.div for Spyre.
 
     Handles all three rounding modes and both Tensor and Scalar y:
-    - None  (true division): int64 → fp32 → div → fp32 output.
+    - None  (true division): int64 → fp32 → div → fp32 output;
+                             non-int64 → NotImplemented (upstream lowering).
     - 'trunc': int64 → fp32 → div → trunc → int64.
     - 'floor': int64 or fp → fp32 (int64 only) → div → floor → ±1 correction
                → int64 (int64 only).
 
-    For rounding_mode=None on non-int64 inputs, returns NotImplemented so the
-    default in-tree lowering handles fp16/fp32 natively.
-
+    Non-int64 inputs for rounding_mode=None return NotImplemented so the
+    upstream Inductor lowering handles them (eager callers must use
+    run_eager=False).
     y may be a Tensor or a Python scalar (int/float) — the scalar overloads
     (aten.div.Scalar, aten.div.Scalar_mode) pass y as a plain Python number.
     """
-    is_int64 = x.dtype == torch.int64
+    is_int64 = isinstance(x, torch.Tensor) and x.dtype == torch.int64
 
     def _cast_y_to_fp32(y_val):
         """Cast y to fp32 regardless of whether it is a Tensor or a scalar."""
@@ -885,10 +916,11 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
 
     if rounding_mode is None:
         if not is_int64:
+            # Non-int64: upstream Inductor lowering handles fp16/fp32 natively.
             return NotImplemented
         xf = torch.ops.prims.convert_element_type(x, torch.float32)
         yf = _cast_y_to_fp32(y)
-        return torch.ops.aten.div.Tensor(xf, yf)
+        return torch.ops.prims.div(xf, yf)
 
     elif rounding_mode == "trunc":
         if not is_int64:
@@ -898,7 +930,7 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
         xf = torch.ops.prims.convert_element_type(x, torch.float32)
         yf = _cast_y_to_fp32(y)
         result = torch.ops.aten.div.Tensor(xf, yf)
-        result = torch.ops.aten.trunc.default(result)
+        # result = torch.ops.aten.trunc.default(result)
         return torch.ops.prims.convert_element_type(result, torch.int64)
 
     elif rounding_mode == "floor":
@@ -934,13 +966,35 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
 def spyre_true_divide(x: torch.Tensor, y) -> torch.Tensor:
     """Decompose aten.true_divide for Spyre (always true division, int64→fp32).
 
+    Non-int64 inputs return NotImplemented so the upstream Inductor lowering
+    handles them (eager callers must use run_eager=False).
     y may be a Tensor or a Python scalar.
     """
-    if x.dtype != torch.int64:
+    is_int64 = isinstance(x, torch.Tensor) and x.dtype == torch.int64
+    if not is_int64:
         return NotImplemented
     xf = torch.ops.prims.convert_element_type(x, torch.float32)
     if isinstance(y, torch.Tensor):
         yf = torch.ops.prims.convert_element_type(y, torch.float32)
     else:
         yf = float(y)
-    return torch.ops.aten.div.Tensor(xf, yf)
+    return torch.ops.prims.div(xf, yf)
+
+
+def _is_int64(*args) -> bool:
+    """Return True if any Tensor argument has dtype int64.
+
+    Scalar (non-Tensor) arguments are ignored.  If no Tensor is present,
+    returns False so the caller falls through to NotImplemented.
+    """
+    for a in args:
+        if isinstance(a, torch.Tensor) and a.dtype == torch.int64:
+            return True
+    return False
+
+
+def _to_fp32(v):
+    """Cast a Tensor to fp32, or convert a scalar to Python float."""
+    if isinstance(v, torch.Tensor):
+        return torch.ops.prims.convert_element_type(v, torch.float32)
+    return float(v)

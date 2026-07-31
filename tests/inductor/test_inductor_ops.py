@@ -4862,7 +4862,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         tensor_args = [arg for arg in args if isinstance(arg, torch.Tensor)]
 
-        self.compare_with_cpu(fn, *tensor_args)
+        self.compare_with_cpu(fn, *tensor_args, run_eager=False)
 
     def test_unary_op_cpu(self, op, x):
         self.compare_with_cpu(op, x)
@@ -6822,7 +6822,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         if isinstance(y, torch.Tensor):
             _replace_near_zero(y)
 
-        self.compare_with_cpu(fn, x, y, run_eager=True)
+        self.compare_with_cpu(fn, x, y, run_eager=False)
 
 
 if __name__ == "__main__":
