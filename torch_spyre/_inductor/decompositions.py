@@ -850,3 +850,74 @@ def spyre_prod_dim_int(
         acc = acc.unsqueeze(dim)
 
     return acc
+
+
+@register_spyre_decompositions(
+    [torch.ops.aten.div.Tensor, torch.ops.aten.div.Tensor_mode]
+)
+def spyre_div(x: torch.Tensor, y: torch.Tensor, *, rounding_mode=None) -> torch.Tensor:
+    """Decompose torch.div for Spyre.
+
+    Handles all three rounding modes:
+    - None  (true division): int64 → fp32 → div → fp32 output.
+    - 'trunc': int64 → fp32 → div → trunc → int64.
+    - 'floor': int64 or fp → fp32 (int64 only) → div → floor → ±1 correction
+               → int64 (int64 only).
+
+    For rounding_mode=None on non-int64 inputs, returns NotImplemented so the
+    default in-tree lowering handles fp16/fp32 natively.
+    """
+    is_int64 = x.dtype == torch.int64
+
+    if rounding_mode is None:
+        if not is_int64:
+            return NotImplemented
+        xf = torch.ops.prims.convert_element_type(x, torch.float32)
+        yf = torch.ops.prims.convert_element_type(y, torch.float32)
+        return torch.ops.aten.div.Tensor(xf, yf)
+
+    elif rounding_mode == "trunc":
+        if not is_int64:
+            raise Unsupported(
+                f"trunc rounding_mode only supports int64 tensors, but got {x.dtype}"
+            )
+        xf = torch.ops.prims.convert_element_type(x, torch.float32)
+        yf = torch.ops.prims.convert_element_type(y, torch.float32)
+        result = torch.ops.aten.div.Tensor(xf, yf)
+        result = torch.ops.aten.trunc.default(result)
+        return torch.ops.prims.convert_element_type(result, torch.int64)
+
+    elif rounding_mode == "floor":
+        if is_int64:
+            xf = torch.ops.prims.convert_element_type(x, torch.float32)
+            yf = torch.ops.prims.convert_element_type(y, torch.float32)
+        else:
+            xf, yf = x, y
+
+        qf = torch.ops.aten.div.Tensor(xf, yf)
+        qf = torch.ops.aten.floor.default(qf)
+
+        # ±1 correction: fp rounding may push the quotient off by 1.
+        # Remainder r = xf - qf*yf should lie in [0, yf).
+        #   r >= yf → quotient under-estimated → qf += 1
+        #   r <  0  → quotient over-estimated  → qf -= 1
+        r = xf - qf * yf
+        qf = torch.where(r >= yf, qf + 1, qf)
+        qf = torch.where(r < 0, qf - 1, qf)
+
+        if is_int64:
+            return torch.ops.prims.convert_element_type(qf, torch.int64)
+        return qf
+
+    else:
+        raise Unsupported(f"Unsupported rounding_mode: {rounding_mode}")
+
+
+@register_spyre_decompositions([torch.ops.aten.true_divide.Tensor])
+def spyre_true_divide(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Decompose aten.true_divide for Spyre (always true division, int64→fp32)."""
+    if x.dtype != torch.int64:
+        return NotImplemented
+    xf = torch.ops.prims.convert_element_type(x, torch.float32)
+    yf = torch.ops.prims.convert_element_type(y, torch.float32)
+    return torch.ops.aten.div.Tensor(xf, yf)
