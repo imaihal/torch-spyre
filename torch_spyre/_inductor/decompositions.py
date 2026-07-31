@@ -850,3 +850,181 @@ def spyre_prod_dim_int(
         acc = acc.unsqueeze(dim)
 
     return acc
+
+
+@register_spyre_decompositions(
+    [
+        torch.ops.aten.div.Tensor,
+        torch.ops.aten.div.Tensor_mode,
+        torch.ops.aten.div.Scalar,
+        torch.ops.aten.div.Scalar_mode,
+    ]
+)
+def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
+    """Decompose torch.div for Spyre.
+
+    Handles all three rounding modes and both Tensor and Scalar y:
+    - None  (true division): int64 → fp32 → div → fp32 output.
+    - 'trunc': int64 → fp32 → div → trunc → int64.
+    - 'floor': int64 or fp → fp32 (int64 only) → div → floor → ±1 correction
+               → int64 (int64 only).
+
+    For rounding_mode=None on non-int64 inputs, returns NotImplemented so the
+    default in-tree lowering handles fp16/fp32 natively.
+
+    y may be a Tensor or a Python scalar (int/float) — the scalar overloads
+    (aten.div.Scalar, aten.div.Scalar_mode) pass y as a plain Python number.
+    """
+    is_int64 = x.dtype == torch.int64
+
+    def _cast_y_to_fp32(y_val):
+        """Cast y to fp32 regardless of whether it is a Tensor or a scalar."""
+        if isinstance(y_val, torch.Tensor):
+            return torch.ops.prims.convert_element_type(y_val, torch.float32)
+        return float(y_val)
+
+    if rounding_mode is None:
+        if not is_int64:
+            return NotImplemented
+        xf = torch.ops.prims.convert_element_type(x, torch.float32)
+        yf = _cast_y_to_fp32(y)
+        return torch.ops.aten.div.Tensor(xf, yf)
+
+    elif rounding_mode == "trunc":
+        if not is_int64:
+            raise Unsupported(
+                f"trunc rounding_mode only supports int64 tensors, but got {x.dtype}"
+            )
+        xf = torch.ops.prims.convert_element_type(x, torch.float32)
+        yf = _cast_y_to_fp32(y)
+        result = torch.ops.aten.div.Tensor(xf, yf)
+        result = torch.ops.aten.trunc.default(result)
+        return torch.ops.prims.convert_element_type(result, torch.int64)
+
+    elif rounding_mode == "floor":
+        if is_int64:
+            xf = torch.ops.prims.convert_element_type(x, torch.float32)
+            yf = _cast_y_to_fp32(y)
+        else:
+            xf = x
+            yf = y
+
+        qf = torch.ops.aten.div.Tensor(xf, yf)
+        qf = torch.ops.aten.floor.default(qf)
+
+        # ±1 correction: fp rounding may push the quotient off by 1.
+        # Remainder r = xf - qf*yf should lie in [0, yf).
+        #   r >= yf → quotient under-estimated → qf += 1
+        #   r <  0  → quotient over-estimated  → qf -= 1
+        r = xf - qf * yf
+        qf = torch.where(r >= yf, qf + 1, qf)
+        qf = torch.where(r < 0, qf - 1, qf)
+
+        if is_int64:
+            return torch.ops.prims.convert_element_type(qf, torch.int64)
+        return qf
+
+    else:
+        raise Unsupported(f"Unsupported rounding_mode: {rounding_mode}")
+
+
+@register_spyre_decompositions(
+    [torch.ops.aten.true_divide.Tensor, torch.ops.aten.true_divide.Scalar]
+)
+def spyre_true_divide(x: torch.Tensor, y) -> torch.Tensor:
+    """Decompose aten.true_divide for Spyre (always true division, int64→fp32).
+
+    y may be a Tensor or a Python scalar.
+    """
+    if x.dtype != torch.int64:
+        return NotImplemented
+    xf = torch.ops.prims.convert_element_type(x, torch.float32)
+    if isinstance(y, torch.Tensor):
+        yf = torch.ops.prims.convert_element_type(y, torch.float32)
+    else:
+        yf = float(y)
+    return torch.ops.aten.div.Tensor(xf, yf)
+
+
+@register_spyre_decompositions([torch.ops.aten.add.Tensor, torch.ops.aten.add.Scalar])
+def spyre_add(x: torch.Tensor, y, *, alpha=1) -> torch.Tensor:
+    """Decompose aten.add for int64 tensors on Spyre (int64 → fp32 → add → int64).
+
+    For non-int64 inputs, returns NotImplemented so the default in-tree lowering
+    handles fp16/fp32 natively.  y may be a Tensor or a Python scalar.
+    """
+    if x.dtype != torch.int64:
+        return NotImplemented
+    xf = torch.ops.prims.convert_element_type(x, torch.float32)
+    if isinstance(y, torch.Tensor):
+        yf = torch.ops.prims.convert_element_type(y, torch.float32)
+    else:
+        yf = float(y)
+    if alpha != 1:
+        yf = yf * float(alpha)
+    result = torch.ops.aten.add.Tensor(xf, yf)
+    return torch.ops.prims.convert_element_type(result, torch.int64)
+
+
+@register_spyre_decompositions([torch.ops.aten.mul.Tensor, torch.ops.aten.mul.Scalar])
+def spyre_mul(x: torch.Tensor, y) -> torch.Tensor:
+    """Decompose aten.mul for int64 tensors on Spyre (int64 → fp32 → mul → int64).
+
+    For non-int64 inputs, returns NotImplemented.  y may be a Tensor or scalar.
+    """
+    if x.dtype != torch.int64:
+        return NotImplemented
+    xf = torch.ops.prims.convert_element_type(x, torch.float32)
+    if isinstance(y, torch.Tensor):
+        yf = torch.ops.prims.convert_element_type(y, torch.float32)
+    else:
+        yf = float(y)
+    result = torch.ops.aten.mul.Tensor(xf, yf)
+    return torch.ops.prims.convert_element_type(result, torch.int64)
+
+
+@register_spyre_decompositions([torch.ops.aten.sub.Tensor, torch.ops.aten.sub.Scalar])
+def spyre_sub(x: torch.Tensor, y, *, alpha=1) -> torch.Tensor:
+    """Decompose aten.sub for int64 tensors on Spyre (int64 → fp32 → sub → int64).
+
+    For non-int64 inputs, returns NotImplemented.  y may be a Tensor or scalar.
+    """
+    if x.dtype != torch.int64:
+        return NotImplemented
+    xf = torch.ops.prims.convert_element_type(x, torch.float32)
+    if isinstance(y, torch.Tensor):
+        yf = torch.ops.prims.convert_element_type(y, torch.float32)
+    else:
+        yf = float(y)
+    if alpha != 1:
+        yf = yf * float(alpha)
+    result = torch.ops.aten.sub.Tensor(xf, yf)
+    return torch.ops.prims.convert_element_type(result, torch.int64)
+
+
+@register_spyre_decompositions([torch.ops.aten.minimum.default])
+def spyre_minimum(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Decompose aten.minimum for int64 tensors on Spyre (int64 → fp32 → min → int64).
+
+    For non-int64 inputs, returns NotImplemented.
+    """
+    if x.dtype != torch.int64:
+        return NotImplemented
+    xf = torch.ops.prims.convert_element_type(x, torch.float32)
+    yf = torch.ops.prims.convert_element_type(y, torch.float32)
+    result = torch.ops.aten.minimum.default(xf, yf)
+    return torch.ops.prims.convert_element_type(result, torch.int64)
+
+
+@register_spyre_decompositions([torch.ops.aten.maximum.default])
+def spyre_maximum(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Decompose aten.maximum for int64 tensors on Spyre (int64 → fp32 → max → int64).
+
+    For non-int64 inputs, returns NotImplemented.
+    """
+    if x.dtype != torch.int64:
+        return NotImplemented
+    xf = torch.ops.prims.convert_element_type(x, torch.float32)
+    yf = torch.ops.prims.convert_element_type(y, torch.float32)
+    result = torch.ops.aten.maximum.default(xf, yf)
+    return torch.ops.prims.convert_element_type(result, torch.int64)
