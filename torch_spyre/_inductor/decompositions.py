@@ -933,10 +933,18 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
         # qf = torch.ops.aten.trunc.default(qf)
         qf = torch.ops.prims.convert_element_type(qf, torch.int64)
         qf = torch.ops.prims.convert_element_type(qf, torch.float32)
-        # ±1 correction: fp rounding may push the quotient off by 1.
-        # Remainder r = xf - qf*yf should lie in [0, yf).
-        #   r >= yf → quotient under-estimated → qf += 1
-        #   r <  0  → quotient over-estimated  → qf -= 1
+
+        # Quotient correction based on remainder bounds.
+        #
+        #   Correct trunc-division results satisfy:
+        #       -yf < r < yf
+        #   where r = xf - qf * yf.
+        #
+        #   Assuming the divider can introduce at most
+        #   a +/-1 quotient error:
+        #
+        #        r >= yf   => qf underestimated by 1
+        #        r <= -yf  => qf overestimated by 1
         r = xf - qf * yf
         qf = torch.where(r >= yf, qf + 1, qf)
         qf = torch.where(r <= -yf, qf - 1, qf)
@@ -953,10 +961,17 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
         qf = torch.ops.aten.div.Tensor(xf, yf)
         qf = torch.ops.aten.floor.default(qf)
 
-        # ±1 correction: fp rounding may push the quotient off by 1.
-        # Remainder r = xf - qf*yf should lie in [0, yf).
-        #   r >= yf → quotient under-estimated → qf += 1
-        #   r <  0  → quotient over-estimated  → qf -= 1
+        # Quotient correction based on remainder bounds.
+        #
+        #   Correct floor-division results satisfy:
+        #        0 <= r < yf
+        #   where r = xf - qf * yf.
+        #
+        #   Assuming the divider can introduce at most
+        #   a +/-1 quotient error:
+        #
+        #        r >= yf => qf underestimated by 1
+        #        r <  0  => qf overestimated by 1
         r = xf - qf * yf
         qf = torch.where(r >= yf, qf + 1, qf)
         qf = torch.where(r < 0, qf - 1, qf)
