@@ -72,7 +72,7 @@ def _current_fx_custom_meta() -> dict[str, Any]:
 def register_spyre_lowering(
     op,
     name=None,
-    broadcast=True,
+    broadcast=False,
     type_promotion_kind=lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
     override_return_dtype=None,
     convert_input_to_bool=False,
@@ -1592,106 +1592,3 @@ def lower_c10d_wait_tensor_async(tensor):
             tensor,
         )
     )
-
-
-def _lower_comparison(op_name: str, x, y):
-    """Shared helper for binary comparison lowerings on Spyre.
-
-    Converts int64 inputs to fp32 (Spyre does not support int64 comparisons
-    natively), applies the named pointwise comparison op, and returns bool.
-
-    Args:
-        op_name: Spyre kernel op name string, e.g. ``"ge"``, ``"lt"``.
-        x, y:    Inductor IR tensors (or scalars after broadcast expansion).
-    """
-    if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
-        x = to_dtype(x, torch.float32)
-    if hasattr(y, "get_dtype") and y.get_dtype() == torch.int64:
-        y = to_dtype(y, torch.float32)
-
-    op_fn = lowering.ops_wrapper(op_name)
-    fn: Callable[..., Any | ir.TensorBox] = lowering.make_pointwise(
-        lambda a, b: op_fn(a, b)
-    )
-
-    result = fn(x, y)
-    result.realize()
-    if result.dtype == torch.float16:
-        result = to_dtype(result, torch.bool)
-        result.realize()
-    return result
-
-
-@register_spyre_lowering(
-    torch.ops.aten.ge.Scalar,
-    broadcast=True,
-    type_promotion_kind=None,
-    override_return_dtype=torch.bool,
-)
-@register_spyre_lowering(
-    torch.ops.aten.ge.Tensor,
-    broadcast=True,
-    type_promotion_kind=None,
-    override_return_dtype=torch.bool,
-)
-def _lower_ge(x, y):
-    """Lower torch.ge (>=) for Spyre.  int64 → fp32 → ge → bool."""
-    return _lower_comparison("ge", x, y)
-
-
-@register_spyre_lowering(
-    torch.ops.aten.lt.Scalar,
-    broadcast=True,
-    type_promotion_kind=None,
-    override_return_dtype=torch.bool,
-)
-@register_spyre_lowering(
-    torch.ops.aten.lt.Tensor,
-    broadcast=True,
-    type_promotion_kind=None,
-    override_return_dtype=torch.bool,
-)
-def _lower_lt(x, y):
-    """Lower torch.lt (<) for Spyre.  int64 → fp32 → lt → bool."""
-    return _lower_comparison("lt", x, y)
-
-
-'''
-@register_spyre_lowering(
-    torch.ops.aten.where.self,
-    broadcast=True,
-    type_promotion_kind=None,
-)
-def _lower_where(condition, x, y):
-    """
-    Lower torch.where (aten.where.self) for Spyre backend.
-
-    Spyre's where3 op natively supports fp16 and fp32 operands
-    (SEN169_FP16 is always valid; fp32 is valid via SPYRE_FP32_OPS).
-    fp16 inputs are passed straight through.  Any other dtype (bool,
-    int64, …) is promoted to fp32.
-
-    The condition is kept in the same float domain to avoid a spurious
-    fp32→bool(fp16)→fp32 round-trip that would break kernel fusion when
-    a greaterequal/lesserthan result feeds directly into where3.
-    """
-    _FLOAT_DTYPES = (torch.float16, torch.float32)
-
-    def _ensure_float(t):
-        if hasattr(t, "get_dtype") and t.get_dtype() not in _FLOAT_DTYPES:
-            return to_dtype(t, torch.float32)
-        return t
-
-    # condition = _ensure_float(condition)
-    x = _ensure_float(x)
-    y = _ensure_float(y)
-
-    where_fn = lowering.ops_wrapper("where")
-    fn: Callable[..., Any | ir.TensorBox] = lowering.make_pointwise(
-        lambda c, a, b: where_fn(c, a, b)
-    )
-
-    result = fn(condition, x, y)
-    result.realize()
-    return result
-'''
