@@ -929,9 +929,18 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
             )
         xf = torch.ops.prims.convert_element_type(x, torch.float32)
         yf = _cast_y_to_fp32(y)
-        result = torch.ops.aten.div.Tensor(xf, yf)
-        # result = torch.ops.aten.trunc.default(result)
-        return torch.ops.prims.convert_element_type(result, torch.int64)
+        qf = torch.ops.aten.div.Tensor(xf, yf)
+        # qf = torch.ops.aten.trunc.default(qf)
+        qf = torch.ops.prims.convert_element_type(qf, torch.int64)
+        qf = torch.ops.prims.convert_element_type(qf, torch.float32)
+        # ±1 correction: fp rounding may push the quotient off by 1.
+        # Remainder r = xf - qf*yf should lie in [0, yf).
+        #   r >= yf → quotient under-estimated → qf += 1
+        #   r <  0  → quotient over-estimated  → qf -= 1
+        r = xf - qf * yf
+        qf = torch.where(r >= yf, qf + 1, qf)
+        qf = torch.where(r <= -yf, qf - 1, qf)
+        return torch.ops.prims.convert_element_type(qf, torch.int64)
 
     elif rounding_mode == "floor":
         if is_int64:
