@@ -163,8 +163,6 @@ SPYRE_FP32_OPS = [
     "equal",
     "notequal",
     "prod",
-    "greaterequal",
-    "lesserthan",
     "where3",
 ]
 
