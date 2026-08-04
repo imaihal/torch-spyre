@@ -882,6 +882,25 @@ def spyre_prod_dim_int(
     return acc
 
 
+def _is_int64(*args) -> bool:
+    """Return True if any Tensor argument has dtype int64.
+
+    Scalar (non-Tensor) arguments are ignored.  If no Tensor is present,
+    returns False so the caller falls through to NotImplemented.
+    """
+    for a in args:
+        if isinstance(a, torch.Tensor) and a.dtype == torch.int64:
+            return True
+    return False
+
+
+def _to_fp32(v):
+    """Cast a Tensor to fp32, or convert a scalar to Python float."""
+    if isinstance(v, torch.Tensor):
+        return torch.ops.prims.convert_element_type(v, torch.float32)
+    return float(v)
+
+
 @register_spyre_decompositions(
     [
         torch.ops.aten.div.Tensor,
@@ -906,29 +925,21 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
     y may be a Tensor or a Python scalar (int/float) — the scalar overloads
     (aten.div.Scalar, aten.div.Scalar_mode) pass y as a plain Python number.
     """
-    is_int64 = isinstance(x, torch.Tensor) and x.dtype == torch.int64
-
-    def _cast_y_to_fp32(y_val):
-        """Cast y to fp32 regardless of whether it is a Tensor or a scalar."""
-        if isinstance(y_val, torch.Tensor):
-            return torch.ops.prims.convert_element_type(y_val, torch.float32)
-        return float(y_val)
-
     if rounding_mode is None:
-        if not is_int64:
+        if not _is_int64(x):
             # Non-int64: upstream Inductor lowering handles fp16/fp32 natively.
             return NotImplemented
-        xf = torch.ops.prims.convert_element_type(x, torch.float32)
-        yf = _cast_y_to_fp32(y)
+        xf = _to_fp32(x)
+        yf = _to_fp32(y)
         return torch.ops.prims.div(xf, yf)
 
     elif rounding_mode == "trunc":
-        if not is_int64:
+        if not _is_int64(x):
             raise Unsupported(
                 f"trunc rounding_mode only supports int64 tensors, but got {x.dtype}"
             )
-        xf = torch.ops.prims.convert_element_type(x, torch.float32)
-        yf = _cast_y_to_fp32(y)
+        xf = _to_fp32(x)
+        yf = _to_fp32(y)
         qf = torch.ops.aten.div.Tensor(xf, yf)
         # qf = torch.ops.aten.trunc.default(qf)
         qf = torch.ops.prims.convert_element_type(qf, torch.int64)
@@ -951,9 +962,9 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
         return torch.ops.prims.convert_element_type(qf, torch.int64)
 
     elif rounding_mode == "floor":
-        if is_int64:
-            xf = torch.ops.prims.convert_element_type(x, torch.float32)
-            yf = _cast_y_to_fp32(y)
+        if _is_int64(x):
+            xf = _to_fp32(x)
+            yf = _to_fp32(y)
         else:
             xf = x
             yf = y
@@ -976,7 +987,7 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
         qf = torch.where(r >= yf, qf + 1, qf)
         qf = torch.where(r < 0, qf - 1, qf)
 
-        if is_int64:
+        if _is_int64(x):
             return torch.ops.prims.convert_element_type(qf, torch.int64)
         return qf
 
@@ -994,31 +1005,6 @@ def spyre_true_divide(x: torch.Tensor, y) -> torch.Tensor:
     handles them (eager callers must use run_eager=False).
     y may be a Tensor or a Python scalar.
     """
-    is_int64 = isinstance(x, torch.Tensor) and x.dtype == torch.int64
-    if not is_int64:
+    if not _is_int64(x):
         return NotImplemented
-    xf = torch.ops.prims.convert_element_type(x, torch.float32)
-    if isinstance(y, torch.Tensor):
-        yf = torch.ops.prims.convert_element_type(y, torch.float32)
-    else:
-        yf = float(y)
-    return torch.ops.prims.div(xf, yf)
-
-
-def _is_int64(*args) -> bool:
-    """Return True if any Tensor argument has dtype int64.
-
-    Scalar (non-Tensor) arguments are ignored.  If no Tensor is present,
-    returns False so the caller falls through to NotImplemented.
-    """
-    for a in args:
-        if isinstance(a, torch.Tensor) and a.dtype == torch.int64:
-            return True
-    return False
-
-
-def _to_fp32(v):
-    """Cast a Tensor to fp32, or convert a scalar to Python float."""
-    if isinstance(v, torch.Tensor):
-        return torch.ops.prims.convert_element_type(v, torch.float32)
-    return float(v)
+    return torch.ops.prims.div(_to_fp32(x), _to_fp32(y))
