@@ -379,11 +379,21 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
           dev_format_dev != DataFormats::INVALID,
       "Unsupported Spyre tensor dtype for DMA transfer: ", dev_str_type);
 
+  // For bool tensors the logical dtype always maps to SEN169_FP16 in the
+  // type_map, but the actual HBM element format depends on how the bool was
+  // produced: an fp32 comparison result is physically IEEE_FP32 (32
+  // elems/stick), not SEN169_FP16 (64 elems/stick).  stl.device_dtype is the
+  // authoritative source for the real on-device format, so use it in place of
+  // dev_format_dev whenever they differ.
+  DataFormats real_dev_format = stl.device_dtype != DataFormats::INVALID
+                                    ? stl.device_dtype
+                                    : dev_format_dev;
+
   DataConversionInfo dci{};
   dci.dci_dsName_ = "DCI-Tensor-0";
   dci.isHostToSen_ = host2device;
-  dci.dataformat_src_ = host2device ? cpu_format_host : dev_format_dev;
-  dci.dataformat_dst_ = host2device ? dev_format_dev : cpu_format_host;
+  dci.dataformat_src_ = host2device ? cpu_format_host : real_dev_format;
+  dci.dataformat_dst_ = host2device ? real_dev_format : cpu_format_host;
   TORCH_CHECK(
       isDCIConversionSupported(dci.dataformat_src_, dci.dataformat_dst_),
       "Unsupported DCI data format conversion: src=",
