@@ -942,6 +942,8 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
         yf = _to_fp32(y)
         qf = torch.ops.aten.div.Tensor(xf, yf)
         # qf = torch.ops.aten.trunc.default(qf)
+        # Since aten.trunc is not supported, use fp32 to int64 as trunc.
+        # Then, int64 to fp32 again to appry correction.
         qf = torch.ops.prims.convert_element_type(qf, torch.int64)
         qf = torch.ops.prims.convert_element_type(qf, torch.float32)
 
