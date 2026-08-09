@@ -1724,10 +1724,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((67, 256), dtype=torch.float32),
                     cached_randn((67, 256), differentiation=1, dtype=torch.float32),
                 ),
-                # "3d_fp32": (
-                #     cached_randn((67, 71, 256), dtype=torch.float32),
-                #     cached_randn((67, 71, 256), differentiation=1, dtype=torch.float32),
-                # ),
+                "3d_fp32": (
+                    cached_randn((67, 71, 256), dtype=torch.float32),
+                    cached_randn((67, 71, 256), differentiation=1, dtype=torch.float32),
+                ),
             },
         },
         ("test_eq_int64", "test_binary_op_cpu"): {
@@ -1743,10 +1743,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
                 ),
-                # "3d_int64": (
-                #     torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
-                #     torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
-                # ),
+                "3d_int64": (
+                    torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
+                ),
             },
         },
         ("test_cmp_scalar_int64", "test_cmp_scalar_int64_cpu"): {

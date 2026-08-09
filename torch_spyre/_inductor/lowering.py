@@ -1396,16 +1396,6 @@ def to_dtype(x, dst_dtype, use_compute_types=True):
         x, dst_dtype, copy=True, use_compute_types=use_compute_types
     )
 
-    # A to_dtype called directly from another lowering has no convert_element_type FX node,
-    # so it inherits the caller's origin and the layout pass skips convert_element_type's
-    # layout propagation enforcement. Inject a synthetic origin so it fires.
-    args: tuple = ()
-    if isinstance(x, ir.IRNode) and (n := x.get_origin_node()) is not None:
-        args = (n,)
-    _ensure_synthetic_origin(result, torch.ops.prims.convert_element_type.default, args)
-
-    return result
-
 
 def with_int64_fallback(fn, *args, convert_output=True):
     """
@@ -1508,6 +1498,64 @@ def lower_minimum(x, y):
 )
 def lower_maximum(x, y):
     return with_int64_fallback(lowering.maximum, x, y)
+
+
+# ---------------------------------------------------------------------------
+# Equality comparison: aten.eq.Tensor / aten.eq.Scalar
+#
+# Spyre does not support integer operands for comparison operations natively.
+# int64 inputs are converted to float32 before the comparison; the bool output
+# is left unconverted because Spyre already supports fp32-backed bool tensors.
+#
+# Other comparison ops (ne, lt, le, gt, ge) can be added in exactly the same
+# way:
+#   1. Write a ``_lower_<op>_impl(x, y)`` helper mirroring ``_lower_eq_impl``.
+#   2. Register two @register_spyre_lowering entries:
+#        - aten.<op>.Tensor  with broadcast=True  → delegates to _lower_<op>_impl
+#        - aten.<op>.Scalar               → converts int64 tensor + scalar, then
+#                                           calls lowering.<op>(x_conv, y_scalar)
+# ---------------------------------------------------------------------------
+
+
+_eq_pointwise = lowering.make_pointwise(
+    lowering.ops_wrapper("eq"), override_return_dtype=torch.bool
+)
+
+
+def _lower_eq_impl(x, y):
+    """Convert int64 tensor operands to float32, then compare.
+
+    The bool output requires no further conversion — Spyre already supports
+    fp32-backed bool tensors.
+    """
+    if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
+        x = to_dtype(x, torch.float32)
+    if hasattr(y, "get_dtype") and y.get_dtype() == torch.int64:
+        y = to_dtype(y, torch.float32)
+    return _eq_pointwise(x, y)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.eq.Tensor,
+    type_promotion_kind=None,
+    broadcast=True,
+)
+def lower_eq_tensor(x, y):
+    return _lower_eq_impl(x, y)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.eq.Scalar,
+    type_promotion_kind=None,
+)
+def lower_eq_scalar(x, y):
+    # When the tensor operand is int64, convert it to float32 and also coerce
+    # the Python scalar to float so both sides share the same type.
+    if hasattr(x, "get_dtype") and x.get_dtype() == torch.int64:
+        x = to_dtype(x, torch.float32)
+        if isinstance(y, int):
+            y = float(y)
+    return _eq_pointwise(x, y)
 
 
 @register_spyre_lowering(torch.ops.spyre.qfp8ch)
@@ -1632,5 +1680,3 @@ def lower_c10d_wait_tensor_async(tensor):
             tensor,
         )
     )
-
-
