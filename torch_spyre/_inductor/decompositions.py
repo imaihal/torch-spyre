@@ -652,6 +652,52 @@ def spyre_amin_decomp(
     return torch.ops.prims.convert_element_type(result_float, torch.bool)
 
 
+@register_spyre_decompositions([torch.ops.aten.sum.dim_IntList])
+def spyre_sum_dim_decomp(
+    input: torch.Tensor, dim=None, keepdim: bool = False, dtype=None
+) -> torch.Tensor:
+    """
+    Decompose torch.sum(input, dim) for boolean tensors.
+
+    For bool tensors: reinterpret as the physical float dtype (zero-copy identity
+    via prims.convert_element_type), promote to fp32 if needed (fp16-based bool),
+    perform an fp32 sum, then cast the result to int64 to match PyTorch CPU
+    semantics (torch.sum on bool returns int64: count of True values).
+
+    For other dtypes: return NotImplemented to use the default lowering.
+    """
+    if input.dtype != torch.bool:
+        return NotImplemented
+
+    # Reinterpret bool as its physical float dtype (zero-copy identity op).
+    float_dtype = _get_float_dtype_for_bool()
+    input_float = torch.ops.prims.convert_element_type(input, float_dtype)
+
+    # Sum requires fp32 precision. If the bool is fp16-based, promote to fp32.
+    if float_dtype != torch.float32:
+        input_float = torch.ops.prims.convert_element_type(input_float, torch.float32)
+
+    result_float = torch.ops.aten.sum.dim_IntList(input_float, dim, keepdim)
+
+    # Cast fp32 sum result to int64: PyTorch CPU semantics for sum(bool) -> int64.
+    # fp32->int64 is not in DtypeOpTable, so to_dtype lowering routes this to
+    # eager_fallback(to_dtype_cpu), the same CPU round-trip used by with_int64_fallback.
+    return torch.ops.prims.convert_element_type(result_float, torch.int64)
+
+
+@register_spyre_decompositions([torch.ops.aten.sum.default])
+def spyre_sum_default_decomp(input: torch.Tensor, dtype=None) -> torch.Tensor:
+    """
+    Decompose torch.sum(input) (no-dim form) for boolean tensors.
+    Reduces over all dimensions. Delegates to spyre_sum_dim_decomp.
+    For other dtypes: return NotImplemented to use the default lowering.
+    """
+    if input.dtype != torch.bool:
+        return NotImplemented
+
+    return spyre_sum_dim_decomp(input, dim=list(range(input.dim())), keepdim=False)
+
+
 @register_spyre_decompositions([torch.ops.aten.ceil.default])
 def spyre_ceil(input: torch.Tensor) -> torch.Tensor:
     return torch.ops.aten.neg.default(
