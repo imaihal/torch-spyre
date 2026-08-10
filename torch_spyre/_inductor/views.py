@@ -17,7 +17,7 @@
 from dataclasses import dataclass, astuple
 import math
 import sympy
-from typing import Optional, Sequence, Dict, Tuple, Callable
+from typing import Callable, Dict, Optional, Sequence, Tuple, cast
 from torch.utils._sympy.functions import ModularIndexing, FloorDiv
 
 from torch._inductor.virtualized import V
@@ -35,6 +35,11 @@ def find_repeat_vars(index_exprs, var_ranges):
                 if m.has(var):
                     mods.append(m)
             if len(mods) != 1:
+                if len(mods) > 1:
+                    raise Unsupported(
+                        f"variable {var} (range {var_range}) appears in multiple Mod "
+                        f"expressions {mods} and cannot be mapped to coordinates."
+                    )
                 continue
             node = mods[0]
             base, modulus = node.args
@@ -95,7 +100,7 @@ def convert_modular_indexing(expr: sympy.Expr) -> sympy.Expr:
 # NOTE: this is intentionally a local copy of pass_utils.concretize_expr.
 # views.py cannot import from pass_utils because pass_utils imports
 # compute_coordinates from views (circular dependency).  The duplication
-# is acceptable because both are thin wrappers around V.graph.sizevars.size_hint.
+# is acceptable because both are thin wrappers around V.graph.sizevars.optimization_hint.
 def _concretize_for_cmp(expr):
     """Return a concrete numeric value for use in comparison operators only.
 
@@ -124,7 +129,7 @@ def _concretize_for_cmp(expr):
     if isinstance(expr, float):
         return expr  # passthrough (incl. math.inf); avoids int(math.inf) error
     if hasattr(expr, "free_symbols") and expr.free_symbols:
-        return V.graph.sizevars.size_hint(expr)
+        return V.graph.sizevars.optimization_hint(expr)
     return int(expr)
 
 
@@ -133,7 +138,7 @@ def compute_coordinates(
     stride: Sequence[sympy.Expr],
     var_ranges: dict[sympy.Symbol, sympy.Expr],
     index: sympy.Expr,
-    indirect_load_subs: "dict | None" = None,
+    indirect_sizes: "dict[sympy.Symbol, int] | None" = None,
 ) -> list[sympy.Expr]:
     """
     Compute an array of coordinate expressions from an index expression.
@@ -146,6 +151,10 @@ def compute_coordinates(
     may contain symbolic expressions (e.g. a dynamic batch dimension); the
     algorithm concretizes range values only for comparison logic, while the
     output coordinate expressions remain symbolic.
+
+    Raises ``Unsupported`` if ``index`` walks a dimension backwards (a loop
+    variable with a negative coefficient, as produced by ``prims.rev``): a
+    device coordinate can only ascend.
     """
     assert all(isinstance(s, (int, sympy.Integer)) for s in stride), (
         f"compute_coordinates requires concrete strides, got {stride}"
@@ -180,6 +189,26 @@ def compute_coordinates(
         # TODO(issue#1373): replace with sympy predicates to avoid concretization.
         concrete_step = _concretize_for_cmp(step)
         concrete_limit = _concretize_for_cmp(limit)
+
+        # ``limit`` below ``step`` means the access walks the dimension
+        # backwards (the index carries a term like ``N - 1 - var``, as
+        # ``prims.rev`` / ``Tensor.flip`` produces).  Every dim test below
+        # compares a non-negative ``stride[dim]`` against ``concrete_step``, so
+        # a descending term can match no dim and would be dropped from
+        # ``coordinates`` entirely -- silently yielding the coordinate for
+        # ``var == 0`` at every iteration.  Device coordinates can only ascend,
+        # so reject it loudly instead (see issue #3558).
+        #
+        # Testing ``limit - step`` rather than ``step``'s sign isolates the
+        # direction from any additive constant folded into both: for a term
+        # ``a*var + b`` over range ``R``, ``limit - step == a*(R - 1)``, so the
+        # comparison sees ``a``'s sign alone.
+        if concrete_limit < concrete_step:
+            raise Unsupported(
+                f"index term for {var} runs backwards (step {step}, limit "
+                f"{limit}): reversed traversal of a tensor dimension cannot "
+                f"be expressed as a device coordinate"
+            )
 
         # find primary dim with largest stride less than or equal to step
         primary_stride = 0
@@ -220,29 +249,17 @@ def compute_coordinates(
         # injected by dynamic shapes that appear in the index expression
         # but are not iteration variables).
         if var not in var_ranges:
-            # Indirect index symbols (e.g. tmp0 from an indirect load) appear
-            # in the index expression but are not loop variables.  Infer their
-            # range from the layout: find the dim whose stride equals the
-            # symbol's coefficient in the index.
-            term = index.xreplace({v: 0 for v in vars - {var}})
-            try:
-                coeff = int(term.xreplace({var: 1}))
-            except (TypeError, ValueError):
-                continue
-            inferred = next(
-                (
-                    sz
-                    for st, sz in zip(stride, size)
-                    if int(st) == coeff and int(sz) > 1
-                ),
-                None,
-            )
-            if inferred is None:
+            # Indirect index variables (tmp0/indirect0) are not loop vars.
+            # Skip if indirect_sizes not provided — allows pre-scheduler
+            # code that doesn't yet support indirect access to proceed.
+            if indirect_sizes is not None and var in indirect_sizes:
+                range_val = indirect_sizes[var]
+            elif indirect_sizes is not None:
                 raise Unsupported(
-                    f"indirect symbol {var} (coeff={coeff}) in index {index} "
-                    f"has no matching stride in layout {list(zip(stride, size))}"
+                    f"indirect symbol {var} not found in indirect_sizes {indirect_sizes}"
                 )
-            range_val = inferred
+            else:
+                continue
         else:
             range_val = var_ranges[var]
 
@@ -266,10 +283,19 @@ def compute_coordinates(
         # compute index({var=1}) and index({var=var_ranges[var]})
         step = term.xreplace({var: 1})
         limit = term.xreplace({var: range_val})
+
+        mods_with_var = [m for m in term.atoms(sympy.Mod) if m.has(var)]
+        if len(mods_with_var) > 1:
+            raise Unsupported(
+                f"variable {var} (range {range_val}) appears in multiple Mod "
+                f"expressions {mods_with_var} and cannot be mapped to coordinates."
+            )
+
         add_term(var=var, step=step, limit=limit)
 
-    if indirect_load_subs:
-        coordinates = [c.xreplace(indirect_load_subs) for c in coordinates]
+    # NOTE: indirect_access_subs substitution is NOT applied here. It is deferred to
+    # after align_tensors() so that indirect symbols are decomposed as regular variables.
+    # The substitution is applied in simplify_op_spec() after align_tensors completes.
     return coordinates
 
 
@@ -346,6 +372,7 @@ def normalize_coordinates(
     size: Sequence[sympy.Expr],
     coordinates: Sequence[sympy.Expr],
     synthetic_var_fn: Callable[[], sympy.Symbol],
+    indirect_sizes: "dict[sympy.Symbol, int] | None" = None,
 ) -> list[Term]:
     """
     Normalize coordinate expressions obtained from compute_coordinates.
@@ -381,19 +408,36 @@ def normalize_coordinates(
                 assert offset == 0
                 terms.append(Term(None, None, None, None, dim_size))
             continue
-        # If all free symbols are indirect (not loop vars), pass the raw
-        # coordinate through as an opaque offset on a var=None term.
+        # If any free symbols are not loop vars, check if they're indirect symbols
+        # with known sizes (from indirect_sizes). If so, treat them like loop vars.
         if not vars.issubset(var_ranges.keys()):
-            terms.append(Term(None, None, None, None, dim_size, offset=coordinate))
-            continue
+            unknown_vars = vars - var_ranges.keys()
+            if not (
+                indirect_sizes is not None
+                and unknown_vars.issubset(indirect_sizes.keys())
+            ):
+                # Symbols with unknown ranges: pass the raw coordinate through
+                # as an opaque offset on a var=None term.
+                terms.append(Term(None, None, None, None, dim_size, offset=coordinate))
+                continue
         dim_terms = []  # terms for current dimension
         for var in vars:
+            # Resolve the range for this variable: loop var from var_ranges, or indirect from indirect_sizes
+            if var in var_ranges:
+                var_range = var_ranges[var]
+            elif indirect_sizes is not None and var in indirect_sizes:
+                var_range = indirect_sizes[var]
+            else:
+                raise Unsupported(
+                    f"Variable {var} in coordinate {expr} has no entry in var_ranges or indirect_sizes"
+                )
+
             # extract term for each var
             term = expr.xreplace({v: 0 for v in vars - {var}}) - offset
             # pattern match expression tree, there is small number of possibilities
             if term.is_symbol:
                 dim_terms.append(
-                    Term(sympy.S.One, sympy.S.One, var, var_ranges[var], dim_size)
+                    Term(sympy.S.One, sympy.S.One, var, var_range, dim_size)
                 )
             elif term.func == sympy.Mod:
                 dim_terms.append(
@@ -401,7 +445,7 @@ def normalize_coordinates(
                 )
             elif term.func == sympy.Mul and term.args[0].is_rational:
                 expr0, expr1 = term.args
-                mod = expr1.args[1] if expr1.func == sympy.Mod else var_ranges[var]
+                mod = expr1.args[1] if expr1.func == sympy.Mod else var_range
                 # TODO: handle non-unit fractions
                 # https://github.com/torch-spyre/torch-spyre/issues/1353
                 assert expr0.numerator == 1 or expr0.denominator == 1, (
@@ -430,10 +474,19 @@ def normalize_coordinates(
         split_dim_terms = []
 
         cum_size = 1
+        # Save original numerators before the loop resets them to 1.
+        # dim_terms[i].num is the flat-index step for variable i.  The
+        # device-dimension range for variable i equals the ratio of
+        # consecutive steps: original_nums[i+1] // original_nums[i].
+        # Using dim_terms[i+1].num directly (which has already been reset
+        # to 1 for lower terms) would give the next variable's raw step,
+        # producing inflated dim_sizes and spurious backGaps when 3+ vars
+        # share a single flat device dimension (e.g. ho*96+kh*24+wo*4+kw).
+        original_nums: list[sympy.Expr] = [cast(sympy.Expr, t.num) for t in dim_terms]
         # for all terms but the last
         for i in range(0, len(dim_terms) - 1):
-            # set dim_size to numerator of next term
-            dim_terms[i].dim_size = dim_terms[i + 1].num
+            # range of variable i = step[i+1] / step[i]
+            dim_terms[i].dim_size = original_nums[i + 1] // original_nums[i]
             # set numerator of next term to 1
             dim_terms[i + 1].num = 1
             # compute cumulative dim_size of all terms up to current term
@@ -477,6 +530,7 @@ def normalize_coordinates(
 def align_tensors(
     iteration_space: Dict[sympy.Symbol, Tuple[sympy.Expr, int]],
     tensors: list[Dict[str, list[sympy.Expr]]],
+    indirect_sizes: "dict[sympy.Symbol, int] | None" = None,
 ) -> tuple[
     (dict[sympy.Symbol, tuple[sympy.Expr, int]], list[dict[str, list[sympy.Expr]]])
 ]:
@@ -488,10 +542,30 @@ def align_tensors(
     # sorting, math.gcd, and integer division that require concrete ints.
     # Coordinate *expressions* remain symbolic (they reference loop variable
     # Symbols, not range values).
-    # TODO(issue#1373): make align_tensors symbolic-aware so concretization can
-    #              be removed.
 
-    repeat_info: set[sympy.Symbol] = getattr(V.graph, "_repeat_info", set())
+    # Save original (possibly symbolic) range expressions before concretizing.
+    # The algorithm below requires concrete ints for sorting and integer division,
+    # but we must propagate symbolic expressions forward so downstream passes
+    # (work_division, SDSC codegen) see the symbols to extract fields, not hints.
+    orig_ranges = {var: val[0] for var, val in iteration_space.items()}
+    # local import: pass_utils imports compute_coordinates/matching_dim from
+    # this module, so importing at module scope would create a cycle.
+    from .pass_utils import finite_upper_or_none
+
+    def _bounded_or_hint(expr, hint):
+        """Return ``expr`` unless it's an unbounded symbolic expression.
+
+        Auto-dynamic symbols (Dynamo promoting an int on retrace, with no
+        finite max and are not symbolic dims ) carry no bound downstream passes
+        (work_division, SDSC codegen) can size buffers/loops with. Fall back to
+        the concretized ``hint`` instead of propagating an unbounded symbol.
+        """
+        if hasattr(expr, "free_symbols") and expr.free_symbols:
+            if finite_upper_or_none(expr) is None:
+                return hint
+        return expr
+
+    repeat_info: dict = getattr(V.graph, "_repeat_info", {})
 
     var_ranges = {
         var: _concretize_for_cmp(val[0]) for var, val in iteration_space.items()
@@ -522,7 +596,11 @@ def align_tensors(
     for tensor in tensors:
         _synthetic_var_idx = 0  # reuse synthetic_var across tensors
         terms = normalize_coordinates(
-            var_ranges, tensor["size"], tensor["coordinates"], synthetic_var
+            var_ranges,
+            tensor["size"],
+            tensor["coordinates"],
+            synthetic_var,
+            indirect_sizes,
         )
         stick_dim.append(terms[-1].var)
         stick_size.append(terms[-1].dim_size)
@@ -532,7 +610,18 @@ def align_tensors(
 
     # for each variable collect bounds (den and mod) for all terms involving variable
     # exclude the sick_size resulting from tiling the stick dimension
-    splits: dict[sympy.Symbol, sympy.Expr] = {var: set() for var in var_ranges.keys()}
+    # Collect all variables that appear in terms (loop vars + indirect symbols).
+    # dict.fromkeys preserves insertion order; set() does not. This matters for two
+    # reasons: (1) frontend determinism; (2) backend workaround — the backend is
+    # sensitive to iteration_space dim label order even though semantically it
+    # should not be.
+    all_vars = dict.fromkeys(var_ranges.keys())
+    for terms in all_terms:
+        for term in terms:
+            if term.var is not None:
+                all_vars[term.var] = None
+
+    splits: dict[sympy.Symbol, sympy.Expr] = {var: set() for var in all_vars}
 
     for i, terms in enumerate(all_terms):
         for num, den, var, mod, dim_size, offset in [astuple(term) for term in terms]:
@@ -548,7 +637,8 @@ def align_tensors(
                     # add mod to splits unless stick dim and stick size
                     splits[var].add(mod)
 
-    V.graph._repeat_info.clear()
+    if hasattr(V.graph, "_repeat_info"):
+        V.graph._repeat_info.clear()
 
     # Insert restored size-1 dimensions with offset/gap to the other tensors
     for var in new_vars:
@@ -578,16 +668,42 @@ def align_tensors(
 
             # distribute work division for old var to new vars
             for v in reversed(remap[var]):
-                new_op_it_space_splits[v] = math.gcd(div, new_var_ranges[v])
+                # Re-intersect the committed split against the basis work
+                # division used for this var.
+                if v == var and v in stick_dim:
+                    # Stick var: stick count. The element range would drop a
+                    # legal split when the size is not a multiple of it
+                    # (e.g. gcd(2, 67) == 1).
+                    eps = int(stick_size[stick_dim.index(v)])
+                    basis = (int(new_var_ranges[v]) + eps - 1) // eps  # stick count
+                else:
+                    # Non-stick var (or synthetic sub-dim): element range.
+                    basis = new_var_ranges[v]
+                new_op_it_space_splits[v] = math.gcd(div, basis)
                 div //= new_op_it_space_splits[v]
         else:
             # no splits keep existing var, range, and work division
             # may happen with a single stick since the stick size is omitted
-            new_var_ranges[var] = var_ranges[var]
+            # downstream passes receive the symbolic expression, not the concretized
+            # hint -- unless the symbol is unbounded, see _bounded_or_hint.
+            # Synthetic vars (z0, z1, …) are introduced by normalize_coordinates
+            # for restored size-1 dims and are not in orig_ranges; fall back to
+            # the concretized value (always 1) for those.
+            new_var_ranges[var] = _bounded_or_hint(
+                orig_ranges.get(var, var_ranges[var]), var_ranges[var]
+            )
+            # var can be a loop var or an indirect symbol
+            if var in var_ranges:
+                new_var_ranges[var] = var_ranges[var]
+            elif indirect_sizes is not None and var in indirect_sizes:
+                new_var_ranges[var] = indirect_sizes[var]
+            else:
+                raise Unsupported(
+                    f"Variable {var} has no range in var_ranges or indirect_sizes"
+                )
             new_op_it_space_splits[var] = (
                 op_it_space_splits[var] if var in op_it_space_splits else 1
             )
-
     # create new tensors with new sizes and coordinate expressions matching new vars
     new_tensors = []
     for j, terms in enumerate(all_terms):
@@ -683,9 +799,70 @@ def align_tensors(
                         t["coordinates"][i] = stick_dim_var // t["size"][-1]
                         t["coordinates"][-1] = stick_dim_var % t["size"][-1]
                         break
+    # Restore original symbolic expressions wherever the algorithm left the
+    # concretized value unchanged (i.e. no splits were applied to that dim).
+    # Only restore when the symbol carries a finite bound (e.g. the user
+    # passed mark_dynamic(max=...)) -- downstream passes (work_division,
+    # SDSC codegen) need a bound to size buffers/loops. Auto-dynamic symbols
+    # (Dynamo promoting an int on retrace, with no finite max) have no such
+    # bound, so fall back to the concretized size-hint instead of
+    # propagating an unbounded symbol. See work_division.py's symbol_meta
+    # for the same distinction.
+    for var, orig_expr in orig_ranges.items():
+        if var not in new_var_ranges or new_var_ranges[var] != var_ranges[var]:
+            continue
+        new_var_ranges[var] = _bounded_or_hint(orig_expr, var_ranges[var])
 
+    # Iteration space should only contain loop variables, not indirect symbols.
+    # Filter out any indirect symbols that were added during normalization.
+    indirect_syms = set(indirect_sizes.keys()) if indirect_sizes else set()
     new_iteration_space = {
-        k: (v, new_op_it_space_splits[k]) for k, v in new_var_ranges.items()
+        k: (v, new_op_it_space_splits[k])
+        for k, v in new_var_ranges.items()
+        if k not in indirect_syms
     }
 
     return new_iteration_space, new_tensors
+
+
+def tiling_expr_to_device_expr(
+    device_size: Sequence[sympy.Expr],
+    stride_map: Sequence[sympy.Expr],
+    index: sympy.Expr,
+) -> sympy.Expr:
+    """
+    Convert a tile offset expression (index) to a device layout (device_size and
+    stride_map)
+    """
+
+    assert all(isinstance(s, (int, sympy.Integer)) for s in device_size), (
+        f"tiling_expr_to_device_expr requires a concrete device_size, got {device_size}"
+    )
+    assert all(isinstance(s, (int, sympy.Integer)) for s in stride_map), (
+        f"tiling_expr_to_device_expr requires a concrete stride_map, got {stride_map}"
+    )
+
+    out = sympy.S.Zero
+    n = len(stride_map)
+    vars = index.free_symbols
+    for var in vars:
+        # index.xreplace({var: 1}) can degenerate to the bare Python int 1
+        # (not sympy.Integer(1)) when `index` is itself exactly the single
+        # symbol being replaced (e.g. index == var, coefficient 1, no other
+        # additive term) -- sympy auto-simplifies Mul(1, var) to var, and
+        # substituting var -> 1 into var alone returns the literal object
+        # passed in. sympy.sympify coerces that raw int back to a proper
+        # sympy numeric type so the second .xreplace call below (which
+        # every other, non-degenerate case already returns) does not crash
+        # with "'int' object has no attribute 'xreplace'".
+        step = sympy.sympify(index.xreplace({var: 1})).xreplace({v: 0 for v in vars})
+        j = -1  # device dimension for var
+        for i in range(n):
+            if (
+                device_size[i] > 1
+                and stride_map[i] > (stride_map[j] if j != -1 else 0)
+                and stride_map[i] <= step
+            ):
+                j = i
+        out += var * math.prod(device_size[j + 1 : n]) * step // stride_map[j]
+    return out

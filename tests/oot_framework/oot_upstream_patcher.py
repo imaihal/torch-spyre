@@ -21,6 +21,7 @@ each call has its own fresh decorator instances. A one-time global patch
 would not affect these copies.
 """
 
+from functools import wraps
 from typing import Set, List, Optional
 import torch
 import regex as re
@@ -118,6 +119,34 @@ class _OOTCpuMovePatcher:
             setattr(self._cls, func_name, wrapped)
 
 
+class _OOTNoGradPatcher:
+    """Wraps an already-instantiated test method to run under torch.no_grad().
+
+    Spyre's custom ops (torch_spyre/_inductor/customops.py) never register an
+    autograd formula, and every eager op call is transparently routed through
+    torch.compile(backend="inductor") (torch_spyre/ops/eager.py). Since
+    nn.Module parameters default to requires_grad=True, AOTAutograd builds a
+    joint forward+backward graph at *compile* time even when the test never
+    calls .backward() -- compilation then fails as soon as a backward-less
+    custom op (e.g. spyre::silu) appears in that graph.
+
+    Upstream's ModuleInfo-based test_forward (test/test_modules.py) builds
+    modules with ordinary requires_grad=True parameters and never calls
+    backward(), so wrapping it in torch.no_grad() keeps compilation on the
+    inference-only path this backend actually supports without changing
+    upstream test semantics.
+    """
+
+    @staticmethod
+    def wrap(fn):
+        @wraps(fn)
+        def _no_grad_wrapper(self, *args, **kwargs):
+            with torch.no_grad():
+                return fn(self, *args, **kwargs)
+
+        return _no_grad_wrapper
+
+
 class _OOTNativeDeviceTypesPatcher:
     """Patches NATIVE_DEVICES in common_device_type to include 'privateuse1'.
 
@@ -132,7 +161,7 @@ class _OOTNativeDeviceTypesPatcher:
     global directly.
 
     NATIVE_DEVICES already includes torch._C._get_privateuse1_backend_name()
-    but TorchTestBase.device_type is reset to the literal string "privateuse1"
+    but OOTTestBase.device_type is reset to the literal string "privateuse1"
     in setUpClass when PYTORCH_TESTING_DEVICE_ONLY_FOR=privateuse1 is set.
     That means the runtime check sees "privateuse1" and misses the registered
      name entry.
@@ -217,7 +246,7 @@ class _OOTOnlyOnPatcher:
                 if isinstance(val.device_type, list):
                     if self._PRIVATEUSE1 not in val.device_type:
                         val.device_type.append(self._PRIVATEUSE1)
-                    # Also append "privateuse1" because TorchTestBase.device_type is
+                    # Also append "privateuse1" because OOTTestBase.device_type is
                     # reset to "privateuse1" in setUpClass (to preserve correct class
                     # naming for PYTORCH_TESTING_DEVICE_ONLY_FOR=privateuse1), so the
                     # @onlyOn check sees "privateuse1" at runtime, not the registered
@@ -630,18 +659,18 @@ class _OOTPrecisionOverridePatcher:
                 # tolerance_overrides takes precedence over precision_overrides
                 # in upstream instantiate_test.
                 if not hasattr(self._underlying_fn, "tolerance_overrides"):
-                    self._underlying_fn.tolerance_overrides = {}
-                self._underlying_fn.tolerance_overrides[dtype] = _tol(
+                    setattr(self._underlying_fn, "tolerance_overrides", {})
+                getattr(self._underlying_fn, "tolerance_overrides")[dtype] = _tol(
                     atol=atol if atol is not None else 0.0,
                     rtol=rtol,
                 )
             elif atol is not None:
                 # atol only - use precision_overrides (simpler, matches @precisionOverride)
                 if not hasattr(self._underlying_fn, "precision_overrides"):
-                    self._underlying_fn.precision_overrides = {}
+                    setattr(self._underlying_fn, "precision_overrides", {})
                 # setdefault for global, direct assign for include (already merged above
                 # so just assign - include already won priority during merge)
-                self._underlying_fn.precision_overrides[dtype] = atol
+                getattr(self._underlying_fn, "precision_overrides")[dtype] = atol
 
 
 class _OOTPlatformMarkerPatcher:
@@ -675,8 +704,10 @@ class _OOTPlatformMarkerPatcher:
         # Attach to pytestmark list so @wraps-based propagation carries it
         # through every decorator layer that instantiate_test applies later.
         if not hasattr(self._underlying_fn, "pytestmark"):
-            self._underlying_fn.pytestmark = []
-        self._underlying_fn.pytestmark = list(self._underlying_fn.pytestmark) + [mark]
+            self._underlying_fn.pytestmark = []  # type: ignore[union-attr]
+        self._underlying_fn.pytestmark = (  # type: ignore[union-attr]
+            list(self._underlying_fn.pytestmark) + [mark]  # type: ignore[union-attr]
+        )
 
 
 class _OOTOpMarkerPatcher:
@@ -706,7 +737,7 @@ class _OOTOpMarkerPatcher:
 
         import pytest
 
-        original_parametrize_fn = self._underlying_fn.parametrize_fn
+        original_parametrize_fn = getattr(self._underlying_fn, "parametrize_fn")
 
         def patched_parametrize_fn(test, generic_cls, device_cls):
             for (
@@ -726,6 +757,16 @@ class _OOTOpMarkerPatcher:
                             test_wrapper
                         )
 
+                    # ModelOpInfo (tests/models/test_model_ops_v2.py) carries the
+                    # per-sample `edits.ops.include[].tags` from the YAML config
+                    # (e.g. "torch.nn.functional.embedding.1_spyre"). Apply each
+                    # as its own mark so a single sample can be selected with
+                    # `-m <tag>`, the same way op__/dtype__ select by op/dtype.
+                    # Plain upstream OpInfo objects have no `op_tags` attribute,
+                    # so this is a no-op for every other @ops-based test suite.
+                    for op_tag in getattr(op, "op_tags", None) or []:
+                        test_wrapper = pytest.mark.__getattr__(op_tag)(test_wrapper)
+
                 if dtype is not None:
                     dtype_safe = re.sub(
                         r"[^a-zA-Z0-9_]", "_", str(dtype).replace("torch.", "")
@@ -739,7 +780,7 @@ class _OOTOpMarkerPatcher:
                 yield test_wrapper, test_name, param_kwargs, decorator_fn
 
         # Replacing on the function object itself because this is what the upstream reads.
-        self._underlying_fn.parametrize_fn = patched_parametrize_fn
+        setattr(self._underlying_fn, "parametrize_fn", patched_parametrize_fn)
 
 
 class _OOTModuleMarkerPatcher:
@@ -773,7 +814,7 @@ class _OOTModuleMarkerPatcher:
 
         import pytest
 
-        original_parametrize_fn = self._underlying_fn.parametrize_fn
+        original_parametrize_fn = getattr(self._underlying_fn, "parametrize_fn")
 
         def patched_parametrize_fn(test, generic_cls, device_cls):
             for (
@@ -810,7 +851,7 @@ class _OOTModuleMarkerPatcher:
 
                 yield test_wrapper, test_name, param_kwargs, decorator_fn
 
-        self._underlying_fn.parametrize_fn = patched_parametrize_fn
+        setattr(self._underlying_fn, "parametrize_fn", patched_parametrize_fn)
         # Also set directly on the test object in case getattr(test, ...)
         # resolves differently from getattr(test.__func__, ...)
         try:

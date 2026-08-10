@@ -19,39 +19,89 @@
 #include <iostream>
 #include <memory>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "spyre_allocator.h"
 #include "spyre_stream.h"
-#include "util/processSpyreCodeArtifacts.h"
+#include "spyrecode-host-functions/processSpyreCodeArtifacts.h"
 
 namespace spyre {
 
 void JobPlanStepH2D::construct(LaunchContext&,
                                const SpyreStream& stream) const {
-  flex::DmaParams params(host_address_, /*to_device=*/true, &device_address_);
-  params.pipeline_barrier = pipeline_barrier_;
-  stream.launchH2D(&params);
+  auto* params =
+      flex::createDmaParams(host_address_, device_address_.total_size(),
+                            /*to_device=*/true, &device_address_);
+  params->pipeline_barrier = pipeline_barrier_;
+  stream.launchH2D(params);
+  flex::destroyDmaParams(params);
 }
 
 void JobPlanStepH2D::write(std::ostream& os) const {
   os << "  H2D (Host-to-Device)\n";
   os << "    Host address: " << host_address_ << "\n";
-  os << "    Device address: " << device_address_ << "\n";
+  os << "    Device CompositeAddress: " << device_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
 }
 
-void JobPlanStepD2H::construct(LaunchContext&,
+void JobPlanStepD2H::construct(LaunchContext& ctx,
                                const SpyreStream& stream) const {
-  flex::DmaParams params(host_address_, /*to_device=*/false, &device_address_);
-  params.pipeline_barrier = pipeline_barrier_;
-  stream.launchD2H(&params);
+  if (std::holds_alternative<flex::CompositeAddress>(device_address_)) {
+    const auto& device_address =
+        std::get<flex::CompositeAddress>(device_address_);
+    auto* params =
+        flex::createDmaParams(host_address_, device_address.total_size(),
+                              /*to_device=*/false, &device_address);
+    params->pipeline_barrier = pipeline_barrier_;
+    stream.launchD2H(params);
+    flex::destroyDmaParams(params);
+  } else {
+    const uint64_t dmva = std::get<Dmva>(device_address_).value;
+    auto segment_id = flex::dmvaToSegmentId(dmva);
+    TORCH_CHECK(segment_id < ctx.inputs_outputs.size(),
+                "D2H tensor-segment lookup out of range: segment ", segment_id,
+                " but only ", ctx.inputs_outputs.size(),
+                " launch args were provided");
+    const auto& tensor = ctx.inputs_outputs.at(segment_id);
+    const auto& tensor_address =
+        static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
+            ->composite_addr;
+    TORCH_CHECK(tensor_address.chunks().size() == 1,
+                "Tensor address must have 1 chunk");
+    const auto& base_chunk = tensor_address.chunks()[0];
+    uint64_t segment_offset = dmva - (segment_id << flex::SEGMENT_SIZE_BITS);
+    TORCH_CHECK(segment_offset + size_ <= tensor_address.total_size(),
+                "D2H transfer out of bounds: offset ", segment_offset,
+                " + size ", size_, " exceeds tensor allocation size ",
+                tensor_address.total_size());
+    flex::LogicalAddress offset_addr(base_chunk.addr.region_id,
+                                     base_chunk.addr.offset + segment_offset);
+    flex::Chunk offset_chunk(offset_addr, size_, base_chunk.domain_id);
+
+    // Create shared_ptr to manage lifetime - will be kept alive by callback
+    auto device_address =
+        std::make_shared<flex::CompositeAddress>(offset_chunk);
+
+    auto* params =
+        flex::createDmaParams(host_address_, device_address->total_size(),
+                              /*to_device=*/false, device_address.get());
+    params->pipeline_barrier = pipeline_barrier_;
+    params->callback = [device_address](void*) {};
+    stream.launchD2H(params);
+    flex::destroyDmaParams(params);
+  }
 }
 
 void JobPlanStepD2H::write(std::ostream& os) const {
   os << "  D2H (Device-to-Host)\n";
-  os << "    Device address: " << device_address_ << "\n";
+  if (std::holds_alternative<flex::CompositeAddress>(device_address_)) {
+    os << "    Device CompositeAddress: "
+       << std::get<flex::CompositeAddress>(device_address_) << "\n";
+  } else {
+    os << "    Device dmva: " << std::get<Dmva>(device_address_).value << "\n";
+  }
   os << "    Host address: " << host_address_ << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
@@ -69,42 +119,41 @@ void JobPlanStepCompute::construct(LaunchContext& ctx,
       tensor_allocs.push_back(address);
     }
   }
-  flex::ComputeParams params(&program_address_, std::move(tensor_allocs), "",
-                             bootstrap_offset_);
-  params.pipeline_barrier = pipeline_barrier_;
-  stream.launchCompute(&params);
+  auto* params = flex::createComputeParams(
+      &program_address_, std::move(tensor_allocs), name_, bootstrap_offset_);
+  params->pipeline_barrier = pipeline_barrier_;
+  stream.launchCompute(params);
+  flex::destroyComputeParams(params);
 }
 
 void JobPlanStepCompute::write(std::ostream& os) const {
   os << "  Device Compute\n";
-  os << "    Program address: " << program_address_ << "\n";
+  os << "    Name: " << (name_.empty() ? "(unnamed)" : name_) << "\n";
+  os << "    Program CompositeAddress: " << program_address_ << "\n";
   os << "    Bind I/O addresses: " << (bind_io_addresses_ ? "yes" : "no")
      << "\n";
   os << "    Pipeline barrier: " << (pipeline_barrier_ ? "enabled" : "disabled")
      << "\n";
 }
 
-// TODO(jni): move to flex
-// convert CompositeAddress to dmva
-static int64_t composite_address_to_dmva(
-    const flex::CompositeAddress& composite_address) {
-  size_t num_chunks = composite_address.chunks().size();
-  TORCH_CHECK(num_chunks == 1, "Interleaved not supported yet");
-
-  const auto& addr = composite_address.chunks()[0].addr;
-  auto& allocator = SpyreAllocator::instance();
-  auto seg_id = allocator.segmentForRegion(addr.region_id);
-  auto address = flex::SegmentByteOffset_todmva(seg_id, addr.offset);
-  return address;
-}
-
 void JobPlanStepHostCompute::construct(LaunchContext& ctx,
                                        const SpyreStream& stream) const {
-  // Helper lambda to build HostCallbackParams and launch on the stream
+  // Helper lambda to build HostCallbackParams and launch on the stream.
+  // flex::RuntimeStream::launchOperationHostCallback() invokes the callback
+  // synchronously in the calling thread, so exceptions propagate directly
+  // through launchHostCallback() to the caller
   auto launch_host_callback = [this, &stream](auto&& callback) {
-    flex::HostCallbackParams params(std::forward<decltype(callback)>(callback),
-                                    nullptr, pipeline_barrier_);
-    stream.launchHostCallback(&params);
+    auto* params = flex::createHostCallbackParams(
+        std::forward<decltype(callback)>(callback), nullptr, pipeline_barrier_);
+    // Use a scope-exit guard so params is freed even if launchHostCallback
+    // throws (which it does when the synchronous host callback raises).
+    struct Guard {
+      flex::HostCallbackParams* p;
+      ~Guard() {
+        flex::destroyHostCallbackParams(p);
+      }
+    } guard{params};
+    stream.launchHostCallback(params);
   };
 
   // Case 1: input_buffer_ is provided
@@ -129,8 +178,9 @@ void JobPlanStepHostCompute::construct(LaunchContext& ctx,
   // Case 3: extract addresses from context tensors
   std::vector<int64_t> addresses(ctx.inputs_outputs.size());
   int addr_idx = 0;
+  auto& allocator = SpyreAllocator::instance();
   for (auto& tensor : ctx.inputs_outputs) {
-    int64_t addr = composite_address_to_dmva(
+    int64_t addr = allocator.compositeAddressToDmva(
         (static_cast<SharedOwnerCtx*>(tensor.storage().data_ptr().get_context())
              ->composite_addr));
     addresses[addr_idx++] = addr;
