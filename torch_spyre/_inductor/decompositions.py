@@ -672,27 +672,6 @@ def spyre_sum_dim_decomp(
     # Reinterpret bool as its physical float dtype (zero-copy identity op).
     float_dtype = _get_float_dtype_for_bool()
 
-    # Guard: every reduced dimension must be divisible by the physical stick size.
-    # Unaligned reductions cannot be mapped onto Spyre sticks correctly.
-    stick_size = get_elem_in_stick(float_dtype)
-    dims_to_check = (
-        list(range(input.dim()))
-        if dim is None
-        else (
-            [d % input.dim() for d in dim]
-            if isinstance(dim, (list, tuple))
-            else [dim % input.dim()]
-        )
-    )
-    for d in dims_to_check:
-        size = input.shape[d]
-        if size % stick_size != 0:
-            raise Unsupported(
-                f"spyre_sum_dim_decomp: reduction dim {d} has size {size}, "
-                f"which is not divisible by stick_size={stick_size} "
-                f"(physical dtype {float_dtype}). Unaligned reductions are not supported."
-            )
-
     input_float = torch.ops.prims.convert_element_type(input, float_dtype)
 
     # Sum requires fp32 precision. If the bool is fp16-based, promote to fp32.
