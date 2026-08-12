@@ -33,6 +33,13 @@ global_stick_optimizer: bool = os.environ.get("GLOBAL_STICK_OPTIMIZER", "1") == 
 # stable per-buffer identity. Inert by default: the SDSC/flex path is unchanged.
 ktir_emitter: bool = os.environ.get("TORCH_SPYRE_KTIR", "0") == "1"
 
+# Settings for device execution over the KTIR path. What is required is checked
+# upfront by ``_check_ktir_device_prerequisites`` in ``execution/async_compile``,
+# which names anything missing.
+
+# A .mlir declaring the target device, passed to the backend compiler.
+ktir_device_mlir: str = os.environ.get("KTIR_DEVICE_MLIR", "")
+
 allow_all_ops_in_lx_planning: bool = False
 
 dxp_lx_frac_avail: float = float(os.environ.get("DXP_LX_FRAC_AVAIL", "0.2"))
