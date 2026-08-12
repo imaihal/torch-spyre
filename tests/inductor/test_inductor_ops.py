@@ -3489,6 +3489,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "ops_dict": {"sum": torch.sum},
             "expect_fail": [
                 "fp32_3d_dim_neg1",
+                "bool_2d_dim_0",
+                "bool_2d_dim_0_unaligned",
+                "bool_2d_dim_1_unaligned",
             ],
             "param_sets": {
                 "fp16_1d_dim_0": (0, True, cached_randn((64,), dtype=torch.float16)),
@@ -3603,10 +3606,41 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     True,
                     cached_randn((3, 7, 9), dtype=torch.float32, scale=0.1),
                 ),
+                "bool_1d_dim_0": (
+                    0,
+                    True,
+                    cached_randn((64,), dtype=torch.float16) > 0,
+                ),
+                "bool_2d_dim_0": (
+                    0,
+                    True,
+                    cached_randn((67, 256), dtype=torch.float16) > 0,
+                ),
+                "bool_2d_dim_1": (
+                    1,
+                    True,
+                    cached_randn((67, 256), dtype=torch.float16) > 0,
+                ),
+                "bool_2d_dim_0_unaligned": (
+                    0,
+                    True,
+                    cached_randn((67, 257), dtype=torch.float16) > 0,
+                ),
+                "bool_2d_dim_1_unaligned": (
+                    1,
+                    True,
+                    cached_randn((67, 257), dtype=torch.float16) > 0,
+                ),
             },
         },
         ("test_sum_keepdim0", "test_sum_eager"): {
             "ops_dict": {"sum": torch.sum},
+            "expect_fail": [
+                "bool_2d_dim_0",
+                "bool_4d_dim_0",
+                "bool_2d_dim_0_unaligned",
+                "bool_2d_dim_1_unaligned",
+            ],
             "param_sets": {
                 "fp16_2d_dim_0": (
                     0,
@@ -3687,6 +3721,36 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     3,
                     False,
                     cached_randn((6, 7, 12, 64), dtype=torch.float32, scale=0.01),
+                ),
+                "bool_2d_dim_0": (
+                    0,
+                    False,
+                    cached_randn((67, 256), dtype=torch.float16) > 0,
+                ),
+                "bool_2d_dim_1": (
+                    1,
+                    False,
+                    cached_randn((67, 256), dtype=torch.float16) > 0,
+                ),
+                "bool_4d_dim_0": (
+                    0,
+                    False,
+                    cached_randn((6, 7, 12, 64), dtype=torch.float16) > 0,
+                ),
+                "bool_4d_dim_3": (
+                    3,
+                    False,
+                    cached_randn((6, 7, 12, 64), dtype=torch.float16) > 0,
+                ),
+                "bool_2d_dim_0_unaligned": (
+                    0,
+                    False,
+                    cached_randn((67, 257), dtype=torch.float16) > 0,
+                ),
+                "bool_2d_dim_1_unaligned": (
+                    1,
+                    False,
+                    cached_randn((67, 257), dtype=torch.float16) > 0,
                 ),
             },
         },
