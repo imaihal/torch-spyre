@@ -260,6 +260,29 @@ def _autoload():
         return
     _autoload._ran = True
 
+    try:
+        _autoload_impl()
+    except BaseException:
+        # PyTorch's _import_device_backends() catches whatever this entrypoint
+        # raises and re-raises a generic "Failed to load the backend extension:
+        # torch_spyre" RuntimeError. In CI logs the chained cause is often not
+        # printed, so the real reason (e.g. an ImportError for an undefined
+        # symbol in a native runtime library such as libspyre_comms /
+        # libflex) is hidden and the failure looks like a mystery. Log the full
+        # traceback here, before control returns to PyTorch, then re-raise so
+        # behaviour is otherwise unchanged.
+        import sys
+        import traceback
+
+        print(
+            "torch_spyre backend autoload failed; underlying error follows:",
+            file=sys.stderr,
+        )
+        traceback.print_exc()
+        raise
+
+
+def _autoload_impl():
     import torch  # noqa: E402
 
     # Set all the appropriate state on PyTorch
@@ -323,6 +346,28 @@ def _autoload():
             _create_spyre_ccl_backend,
             devices=[DEVICE_NAME],
         )
+    except ImportError:
+        pass
+
+    # Register Spyre Profiler
+    try:
+        import torch.profiler
+
+        _orig_init = torch.profiler.profile.__init__
+
+        def _init_with_spyre_profiler(self, *args, **kwargs):
+            # For first call, need to ensure torch_spyre._C is loaded so that SpyreProfiler is registered
+            if not torch.spyre.is_initialized():
+                torch.spyre._impl._lazy_init()
+            try:
+                # This will automatically register the profiler
+                import torch_spyre._C  # noqa: F401
+            except ImportError:
+                pass
+            torch.profiler.profile.__init__ = _orig_init
+            return _orig_init(self, *args, **kwargs)
+
+        torch.profiler.profile.__init__ = _init_with_spyre_profiler
     except ImportError:
         pass
 

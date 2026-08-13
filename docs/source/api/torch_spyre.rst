@@ -576,17 +576,16 @@ Environment Variables
      - Purpose
    * - ``TORCH_SPYRE_DEBUG=1``
      - Build-time: enable C++ debug logging and ``-O0`` builds.
-       Runtime: deprecated, use ``TORCH_LOGS='spyre:DEBUG'`` instead
+       Runtime: deprecated, use ``TORCH_LOGS='+torch_spyre'`` instead
        (see ``torch_spyre.logging_config``)
    * - ``TORCH_SPYRE_DOWNCAST_WARN=0``
      - Suppress int64 → int32 downcast warnings
    * - ``SPYRE_INDUCTOR_LOG=1``
-     - *Deprecated*. Use ``TORCH_LOGS='spyre.inductor:INFO'``. Enables Spyre
-       Inductor logging
+     - *Deprecated*. Use ``TORCH_LOGS='torch_spyre.inductor'``. Enables Spyre
+       Inductor logging (INFO level)
    * - ``SPYRE_INDUCTOR_LOG_LEVEL=DEBUG``
-     - *Deprecated*. Set the level in ``TORCH_LOGS`` (e.g.
-       ``spyre.inductor:DEBUG``). Sets Spyre Inductor log verbosity (DEBUG,
-       INFO, WARNING, ERROR)
+     - *Deprecated*. Use ``TORCH_LOGS='+torch_spyre.inductor'`` (DEBUG level).
+       Sets Spyre Inductor log verbosity
    * - ``SPYRE_LOG_FILE=path``
      - *Deprecated*. Mapped to the top-level ``spyre`` logger file handler.
        Redirects Spyre Inductor logs to a file
@@ -626,13 +625,16 @@ Environment Variables
    * - ``BUNDLE_SYMBOLIC_ARGS``
      - Emit LPDDR5 tensor addresses as runtime symbols rather than baked
        integers (default ``1``)
-   * - ``LX_BOUNDARY_CLONES``
-     - Insert boundary clones at LX scratchpad planning edges (default
-       ``0``)
    * - ``LAYOUT_SOLVER``
      - LX scratchpad layout solver strategy: ``greedy`` (default),
-       ``bestfit``, ``firstfit``, ``cpsat``.
+       ``bestfit``, ``firstfit``, ``cpsat``, ``simulated_annealing``.
        See :doc:`/compiler/scratchpad_planning`
+   * - ``SPYRE_INDUCTOR_ENABLE_REDUCTION_TILING``
+     - Enable reduction tiling in the pre-scheduling pipeline (default
+       ``1``)
+   * - ``SPYRE_LOG_PASSES``
+     - Comma-separated list of pass names after which to log the
+       op-spec IR at pipeline stage boundaries (default empty)
    * - ``MAX_BUCKETS``
      - Maximum number of work division buckets (default ``32``)
    * - ``MIN_DEFAULT_GRANULARITY``

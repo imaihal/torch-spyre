@@ -1,12 +1,18 @@
 name: integration-tests
+run-name: integration-tests (${{ inputs.test_type || 'integration' }})
+# NOTE: run-name intentionally shows the RAW, user-facing input -- test_type
+# tier names (smoke/unit/integration/regression/trunk) ARE the
+# test_suite_config.labels vocabulary directly, with no alias-resolution
+# layer, so this is also what push-to-clickhouse.yaml's trigger_type ends up
+# recording, matching the tier name callers actually asked for.
 
 # ---------------------------------------------------------------------------
 # Triggered by commits in upstream dependant repos (deeptools, flex, etc.) via
-# workflow_dispatch.  Runs the device_critical test subset (streams, job
+# workflow_dispatch.  Runs the integration test subset (streams, job
 # launch plans, codegen, LX/scratchpad planning, tensor layout, allocator/GC,
 # D2D copies -- the device-layer surfaces these upstream tools exercise
 # most) against a specified torch-spyre ref so regressions from upstream
-# changes are caught early. Pass test_type=full for full coverage.
+# changes are caught early. Pass test_type=regression for full coverage.
 #
 # Example caller pattern from an upstream repo's workflow:
 #
@@ -73,15 +79,17 @@ on:
         default: ''
       test_type:
         description: >-
-          Suite subset to run: smoke | core | full | device_critical |
-          suite_<group> | <label>. Default: device_critical (configs whose
-          test_suite_config.labels cover the device-layer surfaces flex and
-          deeptools/dxp_standalone exercise most -- streams, job launch
-          plans, codegen, LX/scratchpad planning, tensor layout,
-          allocator/GC, D2D copies). Pass "full" to run every config.
+          Suite subset to run: smoke | unit | integration | regression |
+          trunk | suite_<group> | <label>. These tier names ARE the
+          test_suite_config.labels vocabulary directly (no alias layer).
+          Default: integration (configs whose test_suite_config.labels cover
+          the device-layer surfaces flex and deeptools/dxp_standalone
+          exercise most -- streams, job launch plans, codegen,
+          LX/scratchpad planning, tensor layout, allocator/GC, D2D copies).
+          Pass "regression" to run every config.
         required: false
         type: string
-        default: device_critical
+        default: integration
       prebaked_image:
         description: >-
           Test the pre-baked torch-spyre-dev image directly (no checkout/build) —
@@ -124,9 +132,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # Run the test matrix, defaulting to the device_critical subset -- same
+  # Run the test matrix, defaulting to the integration subset -- same
   # default as the "run-tests" job in torch_spyre_tests.yaml. Callers can
-  # still request test_type=full for complete coverage.
+  # still request test_type=regression for complete coverage. Tier names
+  # (smoke/unit/integration/regression/trunk) are the literal
+  # test_suite_config.labels vocabulary -- no alias-resolution layer -- so
+  # the raw input is forwarded unchanged here.
   # ---------------------------------------------------------------------------
   run-tests:
     needs: provenance
@@ -138,7 +149,7 @@ jobs:
       checkout_pytorch: false
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      test_type: ${{ inputs.test_type || 'device_critical' }}
+      test_type: ${{ inputs.test_type || 'integration' }}
       prebaked_image: ${{ inputs.prebaked_image }}
 
   # ----------------------------------------------------------------------------------
