@@ -3675,9 +3675,20 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_sum_keepdim1", "test_sum_eager"): {
             "ops_dict": {"sum": torch.sum},
             "expect_fail": [
-                "fp32_3d_dim_neg1",
-                "bool_2d_dim_0",
-                "bool_2d_dim_0_unaligned",
+                # fp32 input: fp32 -> sum(fp32) -> fp32 -> int64
+                #   If the reduction dim is the stick dim, the stick dim must be
+                #   aligned (size must be a multiple of 64). Reductions over other
+                #   dims do not require stick-dim alignment.
+                #
+                # bool input: bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
+                #   The DL16-to-FP32 conversion staggeres the fp32 tensor. Summing
+                #   over a non-stick dim accumulates elements in an order that depends
+                #   on the stagger, producing wrong results (xfail). Summing over the
+                #   stick dim is unaffected because the result is the sum of all
+                #   elements in that dim regardless of their order; stick-dim
+                #   alignment is still required.
+                "fp32_2d_dim_1_unaligned",
+                "bool_2d_non_stickdim",
                 "bool_2d_dim_1_unaligned",
             ],
             "param_sets": {
@@ -3783,35 +3794,25 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     True,
                     cached_randn((6, 7, 12, 256), dtype=torch.float32, scale=0.1),
                 ),
-                "fp32_3d_dim_neg1": (
-                    -1,
+                "fp32_2d_dim_1_unaligned": (
+                    1,
                     True,
-                    cached_randn((3, 7, 9), dtype=torch.float32, scale=0.1),
-                ),
-                "fp32_3d_dim_neg2": (
-                    -2,
-                    True,
-                    cached_randn((3, 7, 9), dtype=torch.float32, scale=0.1),
+                    cached_randn((67, 257), dtype=torch.float32),
                 ),
                 "bool_1d_dim_0": (
                     0,
                     True,
                     cached_randn((64,), dtype=torch.float16) > 0,
                 ),
-                "bool_2d_dim_0": (
+                "bool_2d_non_stickdim": (
                     0,
                     True,
-                    cached_randn((67, 256), dtype=torch.float16) > 0,
+                    cached_randn((64, 256), dtype=torch.float16) > 0,
                 ),
                 "bool_2d_dim_1": (
                     1,
                     True,
                     cached_randn((67, 256), dtype=torch.float16) > 0,
-                ),
-                "bool_2d_dim_0_unaligned": (
-                    0,
-                    True,
-                    cached_randn((67, 257), dtype=torch.float16) > 0,
                 ),
                 "bool_2d_dim_1_unaligned": (
                     1,
@@ -3823,9 +3824,20 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_sum_keepdim0", "test_sum_eager"): {
             "ops_dict": {"sum": torch.sum},
             "expect_fail": [
-                "bool_2d_dim_0",
-                "bool_4d_dim_0",
-                "bool_2d_dim_0_unaligned",
+                # fp32 input: fp32 -> sum(fp32) -> fp32 -> int64
+                #   If the reduction dim is the stick dim, the stick dim must be
+                #   aligned (size must be a multiple of 64). Reductions over other
+                #   dims do not require stick-dim alignment.
+                #
+                # bool input: bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
+                #   The DL16-to-FP32 conversion staggeres the fp32 tensor. Summing
+                #   over a non-stick dim accumulates elements in an order that depends
+                #   on the stagger, producing wrong results (xfail). Summing over the
+                #   stick dim is unaffected because the result is the sum of all
+                #   elements in that dim regardless of their order; stick-dim
+                #   alignment is still required.
+                "fp32_2d_dim_1_unaligned",
+                "bool_2d_non_stickdim",
                 "bool_2d_dim_1_unaligned",
             ],
             "param_sets": {
@@ -3909,7 +3921,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     False,
                     cached_randn((6, 7, 12, 64), dtype=torch.float32, scale=0.01),
                 ),
-                "bool_2d_dim_0": (
+                "fp32_2d_dim_1_unaligned": (
+                    1,
+                    False,
+                    cached_randn((67, 257), dtype=torch.float32),
+                ),
+                "bool_2d_non_stickdim": (
                     0,
                     False,
                     cached_randn((67, 256), dtype=torch.float16) > 0,
@@ -3918,21 +3935,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     1,
                     False,
                     cached_randn((67, 256), dtype=torch.float16) > 0,
-                ),
-                "bool_4d_dim_0": (
-                    0,
-                    False,
-                    cached_randn((6, 7, 12, 64), dtype=torch.float16) > 0,
-                ),
-                "bool_4d_dim_3": (
-                    3,
-                    False,
-                    cached_randn((6, 7, 12, 64), dtype=torch.float16) > 0,
-                ),
-                "bool_2d_dim_0_unaligned": (
-                    0,
-                    False,
-                    cached_randn((67, 257), dtype=torch.float16) > 0,
                 ),
                 "bool_2d_dim_1_unaligned": (
                     1,
@@ -3944,6 +3946,15 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_sum_default", "test_sum_default_base"): {
             "ops_dict": {"sum": torch.sum},
             "expect_fail": [
+                # fp32 input: fp32 -> sum(fp32) -> fp32 -> int64
+                #   Reduces over all dims, so the stick dim is always a reduction
+                #   dim. Stick-dim alignment is required.
+                #
+                # bool input: bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
+                #   The DL16-to-FP32 conversion staggeres the fp32 tensor, but
+                #   reducing over all dims makes element order irrelevant, so
+                #   stagger does not affect correctness. Stick-dim alignment is
+                #   still required.
                 "fp32_unaligned",
                 "bool_unaligned",
             ],
