@@ -677,12 +677,23 @@ def spyre_sum_dim_decomp(
     input: torch.Tensor, dim=None, keepdim: bool = False, dtype=None
 ) -> torch.Tensor:
     """
-    Decompose torch.sum(input, dim) for boolean tensors.
+    Decompose torch.sum(input, dim) for boolean and fp32 tensors.
 
-    For bool tensors: reinterpret as the physical float dtype (zero-copy identity
-    via prims.convert_element_type), promote to fp32 if needed (fp16-based bool),
-    perform an fp32 sum, then cast the result to int64 to match PyTorch CPU
-    semantics (torch.sum on bool returns int64: count of True values).
+    fp32 input:  fp32 -> sum(fp32) -> fp32 -> int64
+        If the reduction dim is the stick dim, the stick dim must be aligned
+        (size must be a multiple of 64). Reductions over other dims do not
+        require stick-dim alignment.
+
+    bool input:  bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
+        The DL16-to-FP32 conversion staggeres the fp32 tensor. Summing over a
+        non-stick dim accumulates elements in an order that depends on the
+        stagger, producing wrong results. Summing over the stick dim is
+        unaffected because the result is the sum of all elements in that dim
+        regardless of their order; stick-dim alignment is still required.
+        The bool tensor is reinterpreted as its physical float dtype (zero-copy
+        identity via prims.convert_element_type), promoted to fp32 if needed
+        (fp16-based bool), summed in fp32, then cast to int64 to match PyTorch
+        CPU semantics (torch.sum on bool returns int64: count of True values).
 
     For other dtypes: return NotImplemented to use the default lowering.
     """
@@ -709,8 +720,18 @@ def spyre_sum_dim_decomp(
 @register_spyre_decompositions([torch.ops.aten.sum.default])
 def spyre_sum_default_decomp(input: torch.Tensor, dtype=None) -> torch.Tensor:
     """
-    Decompose torch.sum(input) (no-dim form) for boolean tensors.
+    Decompose torch.sum(input) (no-dim form) for boolean and fp32 tensors.
     Reduces over all dimensions. Delegates to spyre_sum_dim_decomp.
+
+    fp32 input:  fp32 -> sum(fp32) -> fp32 -> int64
+        Reduces over all dims, so the stick dim is always a reduction dim.
+        Stick-dim alignment is required.
+
+    bool input:  bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
+        The DL16-to-FP32 conversion staggeres the fp32 tensor, but reducing
+        over all dims makes element order irrelevant, so stagger does not
+        affect correctness. Stick-dim alignment is still required.
+
     For other dtypes: return NotImplemented to use the default lowering.
     """
     if input.dtype != torch.bool:
