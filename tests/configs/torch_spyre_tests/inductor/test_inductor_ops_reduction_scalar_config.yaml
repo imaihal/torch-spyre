@@ -31,8 +31,7 @@ test_suite_config:
           mode: xfail
         # Known failures for test_sum_keepdim1
         - names:
-            - TestOps::test_sum_keepdim1_sum_fp32_3d_dim_neg1_spyre
-            - TestOps::test_sum_keepdim1_sum_bool_2d_dim_0_spyre
-            - TestOps::test_sum_keepdim1_sum_bool_2d_dim_0_unaligned_spyre
+            - TestOps::test_sum_keepdim1_sum_fp32_2d_dim_1_unaligned_spyre
+            - TestOps::test_sum_keepdim1_sum_bool_2d_non_stickdim_spyre
             - TestOps::test_sum_keepdim1_sum_bool_2d_dim_1_unaligned_spyre
           mode: xfail
