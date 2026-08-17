@@ -3706,10 +3706,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_sum_keepdim1", "test_sum_eager"): {
             "ops_dict": {"sum": torch.sum},
             "expect_fail": [
-                # fp32 input: fp32 -> sum(fp32) -> fp32 -> int64
+                # fp32 input (device_dtype IEEE_FP32): fp32 -> sum(fp32) -> fp32 -> int64
                 #   If the reduction dim is the stick dim, the stick dim must be
                 #   aligned (size must be a multiple of 64). Reductions over other
                 #   dims do not require stick-dim alignment.
+                #   fp16 (device_dtype SEN169_FP16) has no alignment restriction.
+                #   Both dtypes carry STANDARD EA; device_dtype distinguishes them.
                 #
                 # bool input: bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
                 #   The DL16-to-FP32 conversion staggeres the fp32 tensor. Summing
@@ -3855,10 +3857,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_sum_keepdim0", "test_sum_eager"): {
             "ops_dict": {"sum": torch.sum},
             "expect_fail": [
-                # fp32 input: fp32 -> sum(fp32) -> fp32 -> int64
+                # fp32 input (device_dtype IEEE_FP32): fp32 -> sum(fp32) -> fp32 -> int64
                 #   If the reduction dim is the stick dim, the stick dim must be
                 #   aligned (size must be a multiple of 64). Reductions over other
                 #   dims do not require stick-dim alignment.
+                #   fp16 (device_dtype SEN169_FP16) has no alignment restriction.
+                #   Both dtypes carry STANDARD EA; device_dtype distinguishes them.
                 #
                 # bool input: bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
                 #   The DL16-to-FP32 conversion staggeres the fp32 tensor. Summing
@@ -3977,9 +3981,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_sum_default", "test_sum_default_base"): {
             "ops_dict": {"sum": torch.sum},
             "expect_fail": [
-                # fp32 input: fp32 -> sum(fp32) -> fp32 -> int64
+                # fp32 input (device_dtype IEEE_FP32): fp32 -> sum(fp32) -> fp32 -> int64
                 #   Reduces over all dims, so the stick dim is always a reduction
                 #   dim. Stick-dim alignment is required.
+                #   fp16 (device_dtype SEN169_FP16) has no alignment restriction
+                #   (fp16_unaligned passes). Both dtypes carry STANDARD EA;
+                #   device_dtype distinguishes them.
                 #
                 # bool input: bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
                 #   The DL16-to-FP32 conversion staggeres the fp32 tensor, but
