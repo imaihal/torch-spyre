@@ -778,11 +778,13 @@ def validate_ops(graph: GraphLowering) -> None:
             )
 
 
-def validate_sum_alignment(graph: GraphLowering) -> None:
-    """Validate stick-dim alignment and stagger constraints for torch.sum ops.
-
-    Must run after finalize_layouts, when op.layout is a FixedTiledLayout with
-    a committed SpyreTensorLayout.
+def _validate_sum_op(
+    op: ComputedBuffer,
+    input_dep: MemoryDep,
+    output_dep: MemoryDep,
+    input_layout: FixedTiledLayout,
+) -> None:
+    """Validate stick-dim alignment and stagger constraints for a single sum op.
 
     Two constraints are enforced:
 
@@ -798,12 +800,71 @@ def validate_sum_alignment(graph: GraphLowering) -> None:
         an order that depends on the stagger, producing wrong results. Only
         stick-dim reductions are safe for staggered inputs.
     """
+    input_stl = input_layout.device_layout
+
+    try:
+        x_dev_coords = device_coordinates(input_stl, input_dep, None)
+    except Unsupported:
+        return
+    x_stick_expr = x_dev_coords[-1]
+
+    # The reduction variable is the loop symbol present in the input index
+    # but absent from the output index (the eliminated dimension).
+    reduction_vars = input_dep.index.free_symbols - output_dep.index.free_symbols
+    if len(reduction_vars) != 1:
+        return
+    reduction_var = next(iter(reduction_vars))
+
+    is_stick_reduction = reduction_var in x_stick_expr.free_symbols
+
+    if is_stick_reduction:
+        # fp32 only: fp16 (SEN169_FP16) has no alignment restriction.
+        # Both carry STANDARD EA, so device_dtype is used to distinguish them.
+        if input_stl.device_dtype == DataFormats.IEEE_FP32:
+            in_coords = host_coordinates(input_layout, input_dep, None)
+            stick_dim = matching_dim(in_coords, x_stick_expr)
+            if stick_dim is not None:
+                stick_size = concretize_expr(input_layout.size[stick_dim])
+                eps = input_stl.elems_per_stick()
+                if stick_size % eps != 0:
+                    raise Unsupported(
+                        f"torch.sum over the stick dim requires the stick "
+                        f"dim size to be a multiple of {eps} "
+                        f"(elems_per_stick), but got size {stick_size} "
+                        f"for op {op.get_name()}. "
+                        f"Ensure the stick dim is aligned to a multiple "
+                        f"of {eps}."
+                    )
+    else:
+        # Non-stick reduction on a staggered (DL16_TO_FP32) tensor produces
+        # wrong results: element order depends on the stagger pattern.
+        if input_stl.element_arrangement in STAGGERED_EAS:
+            raise Unsupported(
+                f"torch.sum on a staggered (bool/DL16_TO_FP32) tensor over "
+                f"a non-stick dim is not supported: the DL16-to-FP32 "
+                f"conversion staggeres the tensor, and reducing over a "
+                f"non-stick dim accumulates elements in stagger-dependent "
+                f"order, producing wrong results. "
+                f"Op: {op.get_name()}. "
+                f"Reduce over the stick dim instead."
+            )
+
+
+def validate_ops_post_finalize(graph: GraphLowering) -> None:
+    """Post-finalization validation pass; counterpart to validate_ops.
+
+    This pass runs after finalize_layouts, when
+    every op.layout is a committed FixedTiledLayout with a resolved
+    SpyreTensorLayout (device_layout, device_dtype, elems_per_stick, etc.).
+    It enforces constraints that require those committed physical layouts.
+
+    Currently validates Reduction ops.  Per-reduction-type helpers are
+    dispatched from the loop below; add a new helper and branch to extend.
+    """
     for op in graph.operations:
         if not isinstance(op, ComputedBuffer):
             continue
         if not isinstance(op.data, Reduction):
-            continue
-        if op.data.reduction_type != "sum":
             continue
         if not isinstance(op.layout, FixedTiledLayout):
             continue
@@ -813,7 +874,6 @@ def validate_sum_alignment(graph: GraphLowering) -> None:
         output_deps = [w for w in read_writes.writes if isinstance(w, MemoryDep)]
 
         if len(input_deps) != 1 or len(output_deps) != 1:
-            # Multi-input or no-output sums are not handled here.
             continue
 
         input_dep = input_deps[0]
@@ -826,59 +886,9 @@ def validate_sum_alignment(graph: GraphLowering) -> None:
             continue
 
         input_layout = input_buf.layout
-        input_stl = input_layout.device_layout
 
-        # Compute the stick expression from the committed input layout.
-        try:
-            x_dev_coords = device_coordinates(input_stl, input_dep, None)
-        except Unsupported:
-            continue
-        x_stick_expr = x_dev_coords[-1]
-
-        # Identify the reduction variable: the loop symbol present in the
-        # input index but absent from the output index.
-        reduction_vars = input_dep.index.free_symbols - output_dep.index.free_symbols
-        if len(reduction_vars) != 1:
-            continue
-        reduction_var = next(iter(reduction_vars))
-
-        # Is the reduction over the stick dim?
-        is_stick_reduction = reduction_var in x_stick_expr.free_symbols
-
-        if is_stick_reduction:
-            # fp32 (device_dtype IEEE_FP32) only: stick-dim size must be a
-            # multiple of elems_per_stick. fp16 (device_dtype SEN169_FP16) is
-            # not restricted. Both dtypes carry STANDARD EA, so device_dtype
-            # is used to distinguish them.
-            if input_stl.device_dtype == DataFormats.IEEE_FP32:
-                in_coords = host_coordinates(input_layout, input_dep, None)
-                stick_dim = matching_dim(in_coords, x_stick_expr)
-                if stick_dim is not None:
-                    stick_size = concretize_expr(input_layout.size[stick_dim])
-                    eps = input_stl.elems_per_stick()
-                    if stick_size % eps != 0:
-                        raise Unsupported(
-                            f"torch.sum over the stick dim requires the stick "
-                            f"dim size to be a multiple of {eps} "
-                            f"(elems_per_stick), but got size {stick_size} "
-                            f"for op {op.get_name()}. "
-                            f"Ensure the stick dim is aligned to a multiple "
-                            f"of {eps}."
-                        )
-        else:
-            # Staggered input (bool-derived DL16_TO_FP32): reducing over a
-            # non-stick dim produces wrong results because element order depends
-            # on the stagger.
-            if input_stl.element_arrangement in STAGGERED_EAS:
-                raise Unsupported(
-                    f"torch.sum on a staggered (bool/DL16_TO_FP32) tensor over "
-                    f"a non-stick dim is not supported: the DL16-to-FP32 "
-                    f"conversion staggeres the tensor, and reducing over a "
-                    f"non-stick dim accumulates elements in stagger-dependent "
-                    f"order, producing wrong results. "
-                    f"Op: {op.get_name()}. "
-                    f"Reduce over the stick dim instead."
-                )
+        if op.data.reduction_type == "sum":
+            _validate_sum_op(op, input_dep, output_dep, input_layout)
 
 
 def split_multi_ops(graph: GraphLowering):
