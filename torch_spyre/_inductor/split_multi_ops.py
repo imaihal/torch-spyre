@@ -788,17 +788,31 @@ def _validate_sum_op(
 
     Two constraints are enforced:
 
-    fp32 input (device_dtype IEEE_FP32):  fp32 -> sum(fp32) -> fp32 -> int64
+    fp32 input (device_dtype IEEE_FP32):
         If the reduction dim is the stick dim, the stick dim size must be a
         multiple of elems_per_stick (64). Reductions over other dims do not
         require stick-dim alignment. fp16 inputs (device_dtype SEN169_FP16)
-        are not subject to this restriction.
+        are not subject to this restriction. Both carry STANDARD EA, so
+        device_dtype is used to distinguish them.
 
-    bool input:  bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
-        The DL16-to-FP32 conversion staggeres the fp32 tensor (EA =
-        DL16_TO_FP32). Summing over a non-stick dim accumulates elements in
-        an order that depends on the stagger, producing wrong results. Only
-        stick-dim reductions are safe for staggered inputs.
+    staggered input (EA in STAGGERED_EAS: DL16_TO_FP32 or FP32_TO_DL16):
+        The fp16<->fp32 conversion reorders elements within sticks (the
+        stagger). A non-stick reduction accumulates across stick boundaries
+        in stagger-dependent order, producing wrong results. Only stick-dim
+        reductions are safe. This applies to any tensor with a staggered EA,
+        regardless of how the stagger was introduced. Two common cases:
+
+        bool input:  bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
+            spyre_sum_dim_decomp widens the bool (stored as DL16/fp16) to
+            fp32 via convert_element_type(fp16 -> fp32), which assigns
+            EA = DL16_TO_FP32. Summing over a non-stick dim then
+            accumulates stagger-dependent elements in the wrong order.
+            Summing over the stick dim is safe regardless of alignment.
+
+        fp16 tensor through a pointwise before sum:
+            x_fp32 = x.to(torch.float32)  # EA: DL16_TO_FP32
+            out = x_fp32 + bias            # staggered EA propagates
+            result = out.sum(dim=0)        # non-stick reduction: wrong
     """
     input_stl = input_layout.device_layout
 
@@ -836,15 +850,18 @@ def _validate_sum_op(
                         f"of {eps}."
                     )
     else:
-        # Non-stick reduction on a staggered (DL16_TO_FP32) tensor produces
-        # wrong results: element order depends on the stagger pattern.
+        # A non-stick reduction on a staggered tensor produces wrong results:
+        # the fp16<->fp32 conversion reorders elements within sticks, so
+        # accumulating across non-stick dimensions visits them in the wrong order.
+        # This applies to any staggered input (DL16_TO_FP32 or FP32_TO_DL16),
+        # not only bool-derived tensors.
         if input_stl.element_arrangement in STAGGERED_EAS:
             raise Unsupported(
-                f"torch.sum on a staggered (bool/DL16_TO_FP32) tensor over "
-                f"a non-stick dim is not supported: the DL16-to-FP32 "
-                f"conversion staggeres the tensor, and reducing over a "
-                f"non-stick dim accumulates elements in stagger-dependent "
-                f"order, producing wrong results. "
+                f"torch.sum on a staggered (DL16_TO_FP32/FP32_TO_DL16) tensor "
+                f"over a non-stick dim is not supported: the fp16<->fp32 "
+                f"conversion reorders elements within sticks, and reducing over "
+                f"a non-stick dim accumulates them in stagger-dependent order, "
+                f"producing wrong results. "
                 f"Op: {op.get_name()}. "
                 f"Reduce over the stick dim instead."
             )
