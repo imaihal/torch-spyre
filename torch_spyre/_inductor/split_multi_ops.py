@@ -778,10 +778,48 @@ def validate_ops(graph: GraphLowering) -> None:
             )
 
 
+def _is_bool_derived(buf) -> bool:
+    """Walk back through convert_element_type ops to find the original dtype.
+
+    Returns True if the buffer chain originates from a bool tensor.
+
+    spyre_sum_dim_decomp produces the chain:
+        buf_A: bool -> convert(bool->fp16) -> buf_B: fp16
+                    -> convert(fp16->fp32)  -> buf_C: fp32 [DL16_TO_FP32]
+                    -> sum
+
+    Walking buf_C -> buf_B -> buf_A and checking dtype == torch.bool
+    identifies the bool origin.
+    """
+    _convert_et = torch.ops.prims.convert_element_type.default
+    while buf is not None:
+        layout = getattr(buf, "layout", None)
+        if layout is None:
+            break
+        if getattr(layout, "dtype", None) == torch.bool:
+            return True
+        # Follow a single-input convert_element_type Pointwise one hop back.
+        data = getattr(buf, "data", None)
+        if not isinstance(data, Pointwise):
+            break
+        if not data.origins:
+            break
+        origin = next(iter(data.origins))
+        if getattr(origin, "target", None) != _convert_et:
+            break
+        rw = buf.get_read_writes()
+        inputs = [r for r in rw.reads if isinstance(r, MemoryDep)]
+        if len(inputs) != 1:
+            break
+        buf = V.graph.get_buffer(inputs[0].name)
+    return False
+
+
 def _validate_sum_op(
     op: ComputedBuffer,
     input_dep: MemoryDep,
     output_dep: MemoryDep,
+    input_buf,
     input_layout: FixedTiledLayout,
 ) -> None:
     """Validate stick-dim alignment and stagger constraints for a single sum op.
@@ -795,24 +833,16 @@ def _validate_sum_op(
         are not subject to this restriction. Both carry STANDARD EA, so
         device_dtype is used to distinguish them.
 
-    staggered input (EA in STAGGERED_EAS: DL16_TO_FP32 or FP32_TO_DL16):
-        The fp16<->fp32 conversion reorders elements within sticks (the
-        stagger). A non-stick reduction accumulates across stick boundaries
-        in stagger-dependent order, producing wrong results. Only stick-dim
-        reductions are safe. This applies to any tensor with a staggered EA,
-        regardless of how the stagger was introduced. Two common cases:
+    bool input:  bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
+        spyre_sum_dim_decomp widens the bool (stored as DL16/fp16) to fp32
+        via convert_element_type(fp16 -> fp32), which assigns EA = DL16_TO_FP32.
+        Summing over a non-stick dim then accumulates elements in a
+        stagger-dependent order, producing wrong results. Only stick-dim
+        reductions are safe for bool-derived staggered inputs.
 
-        bool input:  bool(dl16) -> fp32 -> sum(fp32) -> fp32 -> int64
-            spyre_sum_dim_decomp widens the bool (stored as DL16/fp16) to
-            fp32 via convert_element_type(fp16 -> fp32), which assigns
-            EA = DL16_TO_FP32. Summing over a non-stick dim then
-            accumulates stagger-dependent elements in the wrong order.
-            Summing over the stick dim is safe regardless of alignment.
-
-        fp16 tensor through a pointwise before sum:
-            x_fp32 = x.to(torch.float32)  # EA: DL16_TO_FP32
-            out = x_fp32 + bias            # staggered EA propagates
-            result = out.sum(dim=0)        # non-stick reduction: wrong
+        Note: a staggered EA can also arise from non-bool sources (e.g. an fp16
+        model tensor widened to fp32 before sum). Those cases are not gated here
+        because the result can in principle be corrected by reordering.
     """
     input_stl = input_layout.device_layout
 
@@ -850,18 +880,20 @@ def _validate_sum_op(
                         f"of {eps}."
                     )
     else:
-        # A non-stick reduction on a staggered tensor produces wrong results:
-        # the fp16<->fp32 conversion reorders elements within sticks, so
-        # accumulating across non-stick dimensions visits them in the wrong order.
-        # This applies to any staggered input (DL16_TO_FP32 or FP32_TO_DL16),
-        # not only bool-derived tensors.
-        if input_stl.element_arrangement in STAGGERED_EAS:
+        # A non-stick reduction on a bool-derived staggered tensor produces
+        # wrong results: the DL16-to-FP32 conversion reorders elements within
+        # sticks, so accumulating across non-stick dimensions visits them in
+        # the wrong order. Only raise for bool-derived inputs; other staggered
+        # tensors are not gated here.
+        if input_stl.element_arrangement in STAGGERED_EAS and _is_bool_derived(
+            input_buf
+        ):
             raise Unsupported(
-                f"torch.sum on a staggered (DL16_TO_FP32/FP32_TO_DL16) tensor "
-                f"over a non-stick dim is not supported: the fp16<->fp32 "
-                f"conversion reorders elements within sticks, and reducing over "
-                f"a non-stick dim accumulates them in stagger-dependent order, "
-                f"producing wrong results. "
+                f"torch.sum on a bool-derived staggered tensor over a non-stick "
+                f"dim is not supported: the DL16-to-FP32 conversion reorders "
+                f"elements within sticks, and reducing over a non-stick dim "
+                f"accumulates them in stagger-dependent order, producing wrong "
+                f"results. "
                 f"Op: {op.get_name()}. "
                 f"Reduce over the stick dim instead."
             )
@@ -905,7 +937,7 @@ def validate_ops_post_finalize(graph: GraphLowering) -> None:
         input_layout = input_buf.layout
 
         if op.data.reduction_type == "sum":
-            _validate_sum_op(op, input_dep, output_dep, input_layout)
+            _validate_sum_op(op, input_dep, output_dep, input_buf, input_layout)
 
 
 def split_multi_ops(graph: GraphLowering):
