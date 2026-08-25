@@ -373,17 +373,14 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
                   cpu_format_dev != DataFormats::INVALID,
               "Unsupported CPU tensor dtype for DMA transfer: ", cpu_str_type);
 
-  // For bool tensors the logical dtype always maps to SEN169_FP16 in the
-  // type_map, but the actual HBM element format depends on how the bool was
-  // produced: an fp32 comparison result is physically IEEE_FP32 (32
-  // elems/stick), not SEN169_FP16 (64 elems/stick).  stl.device_dtype is the
-  // authoritative source for the real on-device format.
+  // stl.device_dtype is the authoritative on-device element format.  For bool
+  // tensors it may differ from the type-map default (SEN169_FP16): an fp32
+  // comparison result is physically stored as IEEE_FP32 (32 elems/stick).
   //
-  // H2D destination tensors always originate from spyre_empty_strided, which
-  // derives device_dtype from the type map (SEN169_FP16 for bool).  An
-  // IEEE_FP32 bool as an H2D target is therefore not expected; assert loudly if
-  // that assumption is ever violated rather than silently using the wrong
-  // format.
+  // IEEE_FP32 bool tensors are on-device intermediates produced by the
+  // compiler; they are always read D2H and never written H2D.  Guard against
+  // that assumption being violated so a future regression fails loudly rather
+  // than silently transferring data with the wrong element size.
   TORCH_CHECK(
       !(host2device && dev_tensor->scalar_type() == c10::ScalarType::Bool &&
         stl.device_dtype == DataFormats::IEEE_FP32),
