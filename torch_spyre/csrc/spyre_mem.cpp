@@ -382,7 +382,8 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
   // H2D destination tensors always originate from spyre_empty_strided, which
   // derives device_dtype from the type map (SEN169_FP16 for bool).  An
   // IEEE_FP32 bool as an H2D target is therefore not expected; assert loudly if
-  // that assumption is ever violated rather than silently using the wrong format.
+  // that assumption is ever violated rather than silently using the wrong
+  // format.
   TORCH_CHECK(
       !(host2device && dev_tensor->scalar_type() == c10::ScalarType::Bool &&
         stl.device_dtype == DataFormats::IEEE_FP32),
