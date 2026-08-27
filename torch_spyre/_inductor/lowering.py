@@ -1705,15 +1705,22 @@ def to_dtype(x, dst_dtype, use_compute_types=True):
     )
 
 
-def with_int64_fallback(fn, *args, convert_output=True):
+def with_int64_as_fp32(fn, *args, convert_output=True):
     """
-    Helper to handle int64 operations by converting to fp32.
+    Helper to handle int64 operations by promoting operands to fp32.
+
+    Converts int64 tensor arguments to fp32, calls fn, then converts the
+    result back to int64 (unless convert_output=False).  The int64<->fp32
+    conversions now execute natively on Spyre via the int32tofp32 /
+    fp32toint32 hardware ops (int64 tensors are physically stored as
+    IEEE_INT32 on device).
 
     Args:
         fn: The lowering function to call
         *args: Arguments to pass to fn
         convert_output: If True, convert output back to int64.
-                       Set to False for operations like div that should return float.
+                        Set to False for operations like div that should
+                        return float.
     """
     # Skip constants (int/float literals) that don't have get_dtype()
     has_int64 = False
@@ -1757,9 +1764,9 @@ def lower_add(x, y, *, alpha=1):
             device=y.get_device(),
         )
         alpha_tensor.realize()
-        y = with_int64_fallback(lowering.mul, y, alpha_tensor)
+        y = with_int64_as_fp32(lowering.mul, y, alpha_tensor)
         y.realize()
-    return with_int64_fallback(lowering.add, x, y)
+    return with_int64_as_fp32(lowering.add, x, y)
 
 
 @register_spyre_lowering(
@@ -1768,7 +1775,7 @@ def lower_add(x, y, *, alpha=1):
     broadcast=True,
 )
 def lower_mul(x, y):
-    return with_int64_fallback(lowering.mul, x, y)
+    return with_int64_as_fp32(lowering.mul, x, y)
 
 
 @register_spyre_lowering(
@@ -1785,9 +1792,9 @@ def lower_sub(x, y, *, alpha=1):
             device=y.get_device(),
         )
         alpha_tensor.realize()
-        y = with_int64_fallback(lowering.mul, y, alpha_tensor)
+        y = with_int64_as_fp32(lowering.mul, y, alpha_tensor)
         y.realize()
-    return with_int64_fallback(lowering.sub, x, y)
+    return with_int64_as_fp32(lowering.sub, x, y)
 
 
 @register_spyre_lowering(
@@ -1796,7 +1803,7 @@ def lower_sub(x, y, *, alpha=1):
     broadcast=True,
 )
 def lower_minimum(x, y):
-    return with_int64_fallback(lowering.minimum, x, y)
+    return with_int64_as_fp32(lowering.minimum, x, y)
 
 
 @register_spyre_lowering(
@@ -1805,7 +1812,7 @@ def lower_minimum(x, y):
     broadcast=True,
 )
 def lower_maximum(x, y):
-    return with_int64_fallback(lowering.maximum, x, y)
+    return with_int64_as_fp32(lowering.maximum, x, y)
 
 
 @register_spyre_lowering(torch.ops.spyre.qfp8ch)
@@ -1873,7 +1880,7 @@ def lower_prod_dim(x, dim, keepdim=False):
         result.realize()
         return result
 
-    return with_int64_fallback(_prod_dim_impl, x)
+    return with_int64_as_fp32(_prod_dim_impl, x)
 
 
 # ============================================================================
