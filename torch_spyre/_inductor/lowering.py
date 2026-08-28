@@ -307,10 +307,19 @@ def eager_fallback(op, *args, **kwargs):
 
 
 def _ensure_synthetic_origin(result, target, args: tuple) -> None:
-    """Give a lowering result a synthetic ``target`` origin FX node, so Spyre
-    layout passes (which key off ``op.data.origins[].target``) recognize it even
-    when the lowering was called directly, without an FX node of its own. No-op
-    if a ``target`` origin already exists.
+    """Stamp a synthetic ``target`` FX origin on ``result``.
+
+    When a lowering (e.g. clone, to_dtype) is called directly from another
+    lowering rather than dispatched from an FX node, the result inherits the
+    caller's origin.  Layout passes that key off ``op.data.origins[].target``
+    then misidentify the buffer and skip the wrong layout rules.  This function
+    injects a synthetic ``"call_function"`` node with the correct ``target`` so
+    those passes see the right op identity.  No-op if a ``target`` origin
+    already exists.
+
+    Also registers the node in ``V.graph.env`` so that
+    ``split_multi_ops._find_fx_node()`` can resolve the buffer by name when it
+    appears as a load-input inside a downstream fused buffer.
     """
 
     def _realized_buffer(node):
@@ -333,6 +342,17 @@ def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     # buf.data is a frozen Loops; override its origins via object.__setattr__.
     object.__setattr__(buf.data, "origins", OrderedSet([fx_node]))
     buf.origins = OrderedSet([fx_node])
+
+    # FakeTensor propagation has already run, so the synthetic node has no
+    # meta["val"].  Fill it with a meta-device tensor so downstream passes
+    # (e.g. split_multi_ops._make_intermediate_bufs) can read shape/dtype
+    # without a KeyError.
+    fx_node.meta["val"] = torch.empty(
+        result.get_size(), dtype=result.get_dtype(), device="meta"
+    )
+
+    # Register so _find_fx_node() can resolve this buffer by name.
+    V.graph.env[fx_node] = result
 
 
 @register_spyre_lowering(torch.ops.spyre.scaled_mm.default)
@@ -1700,9 +1720,21 @@ def to_dtype(x, dst_dtype, use_compute_types=True):
             op = torch.ops.spyre.to_dtype_cpu.default
             return eager_fallback(op, x, dst_dtype)
 
-    return lowering.to_dtype(
+    result = lowering.to_dtype(
         x, dst_dtype, copy=True, use_compute_types=use_compute_types
     )
+
+    # When to_dtype is called from another lowering (e.g. with_int64_as_fp32)
+    # there is no prims.convert_element_type FX node, so the result inherits
+    # the caller's origin and propagate_layouts skips the dtype-conversion
+    # layout path (which keys on origin_node.target ==
+    # prims.convert_element_type.default).  Inject a synthetic origin so it
+    # fires, mirroring the same pattern used in clone().
+    args: tuple = ()
+    if isinstance(x, ir.IRNode) and (n := x.get_origin_node()) is not None:
+        args = (n,)
+    _ensure_synthetic_origin(result, torch.ops.prims.convert_element_type.default, args)
+    return result
 
 
 def with_int64_as_fp32(fn, *args, convert_output=True):
