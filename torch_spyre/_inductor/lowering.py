@@ -36,6 +36,7 @@ from .constants import (
 )
 from . import config
 import torch_spyre._inductor.customops  # noqa: F401
+import torch_spyre._inductor.distributed.spyre_library  # noqa: F401
 from torch_spyre.ops.fallbacks import fallback_ops
 from .ir import (
     SpyreReduction,
@@ -43,6 +44,7 @@ from .ir import (
     SpyreEmptyFallback,
     BroadcastAsyncFallback,
     WaitWorkFallback,
+    AllGatherAsyncFallback,
     AllReduceAsyncFallback,
 )
 from torch_spyre._C import get_elem_in_stick
@@ -1122,6 +1124,49 @@ def lower_clamp(x, min=None, max=None):
     return pw
 
 
+@register_spyre_lowering(torch.ops.spyre.keep_by_index)
+def lower_keep_by_index(values, indices, dim, fill_value):
+    from .pass_utils import concretize_expr
+
+    x_size = values.get_size()
+    ndim = len(x_size)
+
+    # Concretize dim if symbolic
+    if isinstance(dim, sympy.Basic):
+        norm_dim = int(concretize_expr(dim)) % ndim
+    else:
+        norm_dim = dim % ndim
+
+    indices_size = indices.get_size()
+    values_loader = values.make_loader()
+    indices_loader = indices.make_loader()
+
+    ranges = list(x_size)
+    reduction_ranges = [indices_size[norm_dim]]
+
+    def inner_fn(index, rindex):
+        values_index = list(index)
+        # indices has K at norm_dim position
+        indices_index = list(index)
+        indices_index[norm_dim] = rindex[0]
+        return (values_loader(values_index), indices_loader(indices_index))
+
+    op_info = {"constants": {"maskval": fill_value}}
+    result = SpyreReduction.create(
+        reduction_type="keepbyindex",
+        input_node=[values, indices],
+        device=values.get_device(),
+        dst_dtype=values.get_dtype(),
+        src_dtype=values.get_dtype(),
+        inner_fn=inner_fn,
+        ranges=ranges,
+        reduction_ranges=reduction_ranges,
+        op_info=op_info,
+    )
+    result.realize()
+    return result
+
+
 @register_spyre_lowering(torch.ops.aten.clone.default, type_promotion_kind=None)
 def clone(x, *, memory_format=None):
     result = lowering.clone(x, memory_format=memory_format)
@@ -1264,10 +1309,49 @@ def lower_spyre_from_d2d(src, dst, src_off, dst_off):
     lowering.mutate_to(dst, src)
 
 
-@register_spyre_lowering(torch.ops.spyre.copy_)
-def lower_spyre_copy_(src, dst):
-    lowering.mutate_to(dst, src)
+def _build_mutation_lowering(src, dst):
+    # Builds an explicit MutationLayoutSHOULDREMOVE buffer so the mutation into dst
+    # survives regardless of what the scheduler would otherwise decide.
+    # mutate_to() has multiple code paths and does not always mutate, so
+    # the buffer is constructed by hand here instead.
+    src = lowering.to_dtype(src, dst.get_dtype())
+    src = lowering.expand(src, dst.get_size())
+
+    pw = Pointwise.create(
+        device=dst.get_device(),
+        dtype=dst.get_dtype(),
+        inner_fn=src.make_loader(),
+        ranges=list(dst.get_size()),
+    )
+
+    dst.realize()
+
+    buffer = ir.ComputedBuffer(
+        name=None,
+        layout=ir.MutationLayoutSHOULDREMOVE(dst),
+        data=pw.data.data,
+    )
+    buffer.name = V.graph.register_buffer(buffer)
+    V.graph.register_operation(buffer)
+
     return dst
+
+
+@register_spyre_lowering(torch.ops.spyre.copy_forced)
+def lower_spyre_copy_forced(src, dst):
+    return _build_mutation_lowering(src, dst)
+
+
+@register_spyre_lowering(torch.ops.spyre.opaque_copy_)
+def lower_spyre_opaque_copy_(value, acc):
+    # opaque_copy_ is functional at the FX/AOTAutograd level (see customops.py)
+    # so that assert_functional_graph never sees a mutation. The real
+    # mutating write into acc is introduced here, at lowering time, via the
+    # same MutationLayoutSHOULDREMOVE(acc) buffer that lower_spyre_copy_forced
+    # builds for copy_forced. Everything downstream that keys off
+    # MutationLayoutSHOULDREMOVE (e.g. wsr/coarse_tile.py) treats this
+    # identically to a copy_forced write.
+    return _build_mutation_lowering(value, acc)
 
 
 @register_spyre_lowering(torch.ops.spyre.overwrite)
@@ -1347,7 +1431,7 @@ def lower_full(size, fill_value, dtype=None, layout=None, device=None, pin_memor
     assert not pin_memory, f"doesn't support pin_memory={pin_memory}"
     if dtype is None:
         dtype = torch.get_default_dtype()
-    if dtype not in (torch.float16, torch.float32):
+    if dtype not in (torch.float16, torch.bfloat16, torch.float32):
         return ir.TensorBox.create(
             ir.FallbackKernel.create(
                 torch.ops.aten.full.default,
@@ -1793,6 +1877,43 @@ def lower_prod_dim(x, dim, keepdim=False):
     return with_int64_fallback(_prod_dim_impl, x)
 
 
+@register_spyre_lowering(torch.ops.aten.any.dim, type_promotion_kind=None)
+@register_spyre_lowering(torch.ops.aten.any.dims, type_promotion_kind=None)
+def lower_any_dim(x, dim, keepdim=False):
+    x = to_dtype(x, torch.float16)
+    x.realize()
+
+    # Handle both single dimension and tuple of dimensions
+    axis = [dim] if isinstance(dim, int) else list(dim)
+
+    kwargs = lowering._make_reduction_inner(
+        x, axis=axis, keepdims=keepdim, dtype=x.dtype, override_return_dtype=None
+    )
+    result = Reduction.create(
+        reduction_type="absmax",
+        input_node=x,
+        **kwargs,
+    )
+    result.realize()
+    return to_dtype(result, torch.bool)
+
+
+@register_spyre_lowering(torch.ops.aten.any.default, type_promotion_kind=None)
+def lower_any_def(x):
+    x = to_dtype(x, torch.float16)
+    x.realize()
+    kwargs = lowering._make_reduction_inner(
+        x, axis=None, keepdims=None, dtype=x.dtype, override_return_dtype=None
+    )
+    result = Reduction.create(
+        reduction_type="absmax",
+        input_node=x,
+        **kwargs,
+    )
+    result.realize()
+    return to_dtype(result, torch.bool)
+
+
 # ============================================================================
 # Direct c10d Lowerings
 # ============================================================================
@@ -1845,6 +1966,37 @@ def lower_c10d_wait_tensor_async(tensor):
         WaitWorkFallback(
             torch.ops.spyre.wait_work.default,
             tensor,
+        )
+    )
+
+
+@register_spyre_lowering(torch.ops._c10d_functional.all_gather_into_tensor.default)
+def lower_c10d_all_gather_async(tensor, group_size, group_name):
+    """
+    Direct lowering for _c10d_functional.all_gather_into_tensor using ASYNC pattern.
+
+    Creates an async all_gather operation that returns immediately without blocking.
+    Output tensor has shape[0] = input.shape[0] * group_size (concatenation of all ranks).
+
+    Flow:
+      _c10d_functional.all_gather_into_tensor → This lowering
+      → AllGatherAsyncFallback → Generated code:
+      torch.ops.spyre.all_gather_async() → C++ → spyre-comms (non-blocking)
+    """
+    logger.info(
+        "Lowering _c10d_functional.all_gather_into_tensor to "
+        "SpyreAllGatherAsyncFallback (group_size=%s, group_name='%s')",
+        group_size,
+        group_name,
+    )
+
+    tensor.realize()
+    return ir.TensorBox.create(
+        AllGatherAsyncFallback(
+            torch.ops.spyre.all_gather_async.default,
+            tensor,
+            group_size,
+            group_name,
         )
     )
 
