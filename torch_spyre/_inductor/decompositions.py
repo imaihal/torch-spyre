@@ -1359,6 +1359,14 @@ def _adapt_dtype(v, to_dtype: torch.dtype, only_if: Optional[torch.dtype] = None
     return torch.ops.spyre.adapt_dtype_scalar(v, to_dtype, only_if=only_if)
 
 
+def _broadcast_if_tensors(a, b):
+    """Broadcast two tensor operands to a common shape if their shapes differ."""
+    if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+        if a.shape != b.shape:
+            return torch.broadcast_tensors(a, b)
+    return a, b
+
+
 @register_spyre_decompositions(
     [
         torch.ops.aten.div.Tensor,
@@ -1371,9 +1379,10 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
     """Decompose torch.div for Spyre."""
     xf = _adapt_dtype(x, to_dtype=torch.float32, only_if=torch.int64)
     yf = _adapt_dtype(y, to_dtype=torch.float32, only_if=torch.int64)
+    xf, yf = _broadcast_if_tensors(xf, yf)
 
     if rounding_mode == "floor":
-        qf = torch.ops.aten.div.Tensor(xf, yf)
+        qf = torch.ops.prims.div(xf, yf)
         qf = torch.ops.aten.floor.default(qf)
 
         # Quotient correction based on remainder bounds.
@@ -1395,7 +1404,7 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
 
     elif rounding_mode == "trunc":
         # TODO: Use PR #3610 for trunc div
-        qf = torch.ops.aten.div.Tensor(xf, yf)
+        qf = torch.ops.prims.div(xf, yf)
         qf = _adapt_dtype(qf, to_dtype=torch.int64, only_if=torch.float32)
         qf = _adapt_dtype(qf, to_dtype=torch.float32, only_if=torch.int64)
 
@@ -1430,4 +1439,5 @@ def spyre_true_divide(x: torch.Tensor, y) -> torch.Tensor:
     """
     xf = _adapt_dtype(x, to_dtype=torch.float32, only_if=torch.int64)
     yf = _adapt_dtype(y, to_dtype=torch.float32, only_if=torch.int64)
+    xf, yf = _broadcast_if_tensors(xf, yf)
     return torch.ops.prims.div(xf, yf)
