@@ -1352,23 +1352,11 @@ def spyre_index_add(
     return torch.index_put(self, indices, updated, accumulate=False)
 
 
-def _is_int64(*args) -> bool:
-    """Return True if any Tensor argument has dtype int64.
-
-    Scalar (non-Tensor) arguments are ignored.  If no Tensor is present,
-    returns False so the caller falls through to NotImplemented.
-    """
-    for a in args:
-        if isinstance(a, torch.Tensor) and a.dtype == torch.int64:
-            return True
-    return False
-
-
-def _to_fp32(v):
-    """Cast a Tensor to fp32, or convert a scalar to Python float."""
+def _adapt_dtype(v, to_dtype: torch.dtype, only_if: Optional[torch.dtype] = None):
+    """Adapt tensor or scalar data type to `to_dtype`, optionally only if matching `only_if`."""
     if isinstance(v, torch.Tensor):
-        return torch.ops.prims.convert_element_type(v, torch.float32)
-    return float(v)
+        return torch.ops.spyre.adapt_dtype(v, to_dtype, only_if=only_if)
+    return torch.ops.spyre.adapt_dtype_scalar(v, to_dtype, only_if=only_if)
 
 
 @register_spyre_decompositions(
@@ -1380,67 +1368,11 @@ def _to_fp32(v):
     ]
 )
 def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
-    """Decompose torch.div for Spyre.
+    """Decompose torch.div for Spyre."""
+    xf = _adapt_dtype(x, to_dtype=torch.float32, only_if=torch.int64)
+    yf = _adapt_dtype(y, to_dtype=torch.float32, only_if=torch.int64)
 
-    Handles all three rounding modes and both Tensor and Scalar y:
-    - None  (true division): int64 → fp32 → div → fp32 output;
-                             non-int64 → NotImplemented (upstream lowering).
-    - 'trunc': int64 → fp32 → div → trunc → int64.
-    - 'floor': int64 or fp → fp32 (int64 only) → div → floor → ±1 correction
-               → int64 (int64 only).
-
-    Non-int64 inputs for rounding_mode=None return NotImplemented so the
-    upstream Inductor lowering handles them (eager callers must use
-    run_eager=False).
-    y may be a Tensor or a Python scalar (int/float) — the scalar overloads
-    (aten.div.Scalar, aten.div.Scalar_mode) pass y as a plain Python number.
-    """
-    if rounding_mode is None:
-        if not _is_int64(x):
-            # Non-int64: upstream Inductor lowering handles fp16/fp32 natively.
-            return NotImplemented
-        xf = _to_fp32(x)
-        yf = _to_fp32(y)
-        return torch.ops.prims.div(xf, yf)
-
-    elif rounding_mode == "trunc":
-        if not _is_int64(x):
-            raise Unsupported(
-                f"trunc rounding_mode only supports int64 tensors, but got {x.dtype}"
-            )
-        xf = _to_fp32(x)
-        yf = _to_fp32(y)
-        qf = torch.ops.aten.div.Tensor(xf, yf)
-        # qf = torch.ops.aten.trunc.default(qf)
-        # Since aten.trunc is not supported, use fp32 to int64 as trunc.
-        # Then, int64 to fp32 again to appry correction.
-        qf = torch.ops.prims.convert_element_type(qf, torch.int64)
-        qf = torch.ops.prims.convert_element_type(qf, torch.float32)
-
-        # Quotient correction based on remainder bounds.
-        #
-        #   Correct trunc-division results satisfy:
-        #       -yf < r < yf
-        #   where r = xf - qf * yf.
-        #
-        #   Assuming the divider can introduce at most
-        #   a +/-1 quotient error:
-        #
-        #        r >= yf   => qf underestimated by 1
-        #        r <= -yf  => qf overestimated by 1
-        r = xf - qf * yf
-        qf = torch.where(r >= yf, qf + 1, qf)
-        qf = torch.where(r <= -yf, qf - 1, qf)
-        return torch.ops.prims.convert_element_type(qf, torch.int64)
-
-    elif rounding_mode == "floor":
-        if _is_int64(x):
-            xf = _to_fp32(x)
-            yf = _to_fp32(y)
-        else:
-            xf = x
-            yf = y
-
+    if rounding_mode == "floor":
         qf = torch.ops.aten.div.Tensor(xf, yf)
         qf = torch.ops.aten.floor.default(qf)
 
@@ -1459,24 +1391,43 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
         qf = torch.where(r >= yf, qf + 1, qf)
         qf = torch.where(r < 0, qf - 1, qf)
 
-        if _is_int64(x):
-            return torch.ops.prims.convert_element_type(qf, torch.int64)
-        return qf
+        return _adapt_dtype(qf, to_dtype=x.dtype)
+
+    elif rounding_mode == "trunc":
+        # TODO: Use PR #3610 for trunc div
+        qf = torch.ops.aten.div.Tensor(xf, yf)
+        qf = _adapt_dtype(qf, to_dtype=torch.int64, only_if=torch.float32)
+        qf = _adapt_dtype(qf, to_dtype=torch.float32, only_if=torch.int64)
+
+        # Quotient correction based on remainder bounds.
+        #
+        #   Correct trunc-division results satisfy:
+        #       -yf < r < yf
+        #   where r = xf - qf * yf.
+        #
+        #   Assuming the divider can introduce at most
+        #   a +/-1 quotient error:
+        #
+        #        r >= yf   => qf underestimated by 1
+        #        r <= -yf  => qf overestimated by 1
+        r = xf - qf * yf
+        qf = torch.where(r >= yf, qf + 1, qf)
+        qf = torch.where(r <= -yf, qf - 1, qf)
+        return _adapt_dtype(qf, to_dtype=torch.int64, only_if=torch.float32)
 
     else:
-        raise Unsupported(f"Unsupported rounding_mode: {rounding_mode}")
+        return torch.ops.prims.div(xf, yf)
 
 
 @register_spyre_decompositions(
     [torch.ops.aten.true_divide.Tensor, torch.ops.aten.true_divide.Scalar]
 )
 def spyre_true_divide(x: torch.Tensor, y) -> torch.Tensor:
-    """Decompose aten.true_divide for Spyre (always true division, int64→fp32).
+    """Decompose aten.true_divide for Spyre (always true division).
 
-    Non-int64 inputs return NotImplemented so the upstream Inductor lowering
-    handles them (eager callers must use run_eager=False).
-    y may be a Tensor or a Python scalar.
+    Adapts int64 inputs to fp32 via `_adapt_dtype`, leaving other dtypes
+    unchanged for native division. `y` may be a Tensor or a Python scalar.
     """
-    if not _is_int64(x):
-        return NotImplemented
-    return torch.ops.prims.div(_to_fp32(x), _to_fp32(y))
+    xf = _adapt_dtype(x, to_dtype=torch.float32, only_if=torch.int64)
+    yf = _adapt_dtype(y, to_dtype=torch.float32, only_if=torch.int64)
+    return torch.ops.prims.div(xf, yf)
