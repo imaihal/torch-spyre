@@ -1658,6 +1658,7 @@ def lower_constant_pad_nd(input, pad, value=0, align_to_stick=False):
     type_promotion_kind=None,
 )
 def to_dtype(x, dst_dtype, use_compute_types=True):
+    x.realize()
     # PT 2.12 passes a ``use_compute_types`` kwarg to registered dtype-conversion
     # lowerings; accept and forward it to the in-tree lowering.
     from torch_spyre._inductor.dtype_ops import DtypeOpTable
@@ -1701,6 +1702,7 @@ def to_dtype(x, dst_dtype, use_compute_types=True):
     if isinstance(x, ir.IRNode) and (n := x.get_origin_node()) is not None:
         args = (n,)
     _ensure_synthetic_origin(result, torch.ops.prims.convert_element_type.default, args)
+    result.realize()
     return result
 
 

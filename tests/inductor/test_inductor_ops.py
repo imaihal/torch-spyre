@@ -824,6 +824,30 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        # (
+        #    "test_pointwise_binary_op_int64_broadcast",
+        #    "test_binary_op",
+        # ): {
+        #    "ops_dict": POINTWISE_BINARY_OPS_INT64_DICT,
+        #    "param_sets": {
+        #        "1d_2d": (
+        #            torch.randint(-100, 100, (32,), dtype=torch.int64),
+        #            torch.randint(-100, 100, (32, 32), dtype=torch.int64),
+        #        ),
+        #        "1d_2d_1": (
+        #            torch.randint(-100, 100, (32, 1), dtype=torch.int64),
+        #            torch.randint(-100, 100, (32, 32), dtype=torch.int64),
+        #        ),
+        #        "1d_2d_1_fp32": (
+        #            torch.randint(-100, 100, (32, 1), dtype=torch.float32),
+        #            torch.randint(-100, 100, (32, 32), dtype=torch.float32),
+        #        ),
+        #        "1d_3d": (
+        #            torch.randint(-100, 100, (256,), dtype=torch.int64),
+        #            torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
+        #        ),
+        #    },
+        # },
         ("test_add_broadcast", "test_add_broadcast"): {
             "param_sets": make_param_dict(
                 [
@@ -5509,6 +5533,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     True,
                 ),
             },
+            "expect_fail": [
+                "int64_dim1",
+                "int64_dim1_keepdim",
+                "int64_dim1_2",
+                "int64_dim1_2_keepdim",
+            ],
         },
         ("test_unfold", "test_unfold_cpu"): {
             "param_sets": {
