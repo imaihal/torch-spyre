@@ -152,27 +152,6 @@ def register_spyre_decompositions(ops: OpOrOps):
     eager-mode dispatch reaches it too. This is required for
     ``CompositeImplicitAutograd`` ops (``rms_norm``, ``layer_norm``, ...); it
     is harmless for the rest.
-
-    ``NotImplemented`` as a return value
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Returning ``NotImplemented`` from a registered decomposition is **only
-    valid inside ``torch.compile``'s decomp pass** (``make_fx`` tracing).
-    There it acts as a skip signal: the tracing machinery leaves the op
-    un-decomposed and Inductor lowers it directly via the upstream lowering
-    table.
-
-    In **eager mode** the same function is wrapped by ``_OPWrapper`` and
-    executed via ``torch.compile(fn)(*args)``.  When the compiled function
-    returns ``NotImplemented``, that Python sentinel is handed back to
-    PyTorch's C++ dispatch layer, which attempts to cast it to a Tensor and
-    raises::
-
-        RuntimeError: Unable to cast NotImplemented to Tensor
-
-    Therefore any decomposition that returns ``NotImplemented`` for some
-    inputs **must not be called eagerly** with those inputs.  The standard
-    safeguard is to pass ``run_eager=False`` to ``compare_with_cpu()`` in the
-    corresponding test, which skips the eager execution path.
     """
     return decomp.register_decomposition(ops, spyre_decompositions)
 
@@ -213,15 +192,6 @@ class _OPWrapper:
     subsequent eager calls reuse the compiled entry point. When invoked from
     inside an active ``torch.compile`` context, the wrapped function is called
     directly — re-entering ``torch.compile`` would be wrong.
-
-    .. warning:: ``NotImplemented`` is not safe here.
-        If the wrapped decomposition returns ``NotImplemented`` (the standard
-        decomp-table skip signal inside ``make_fx``), ``torch.compile(fn)``
-        propagates that Python sentinel as the return value.  PyTorch's C++
-        dispatch layer then tries to cast it to a ``Tensor`` and raises
-        ``RuntimeError: Unable to cast NotImplemented to Tensor``.
-        Decompositions that return ``NotImplemented`` for certain inputs must
-        not be invoked eagerly with those inputs (use ``run_eager=False``).
     """
 
     def __init__(self, fn):
