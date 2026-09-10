@@ -1731,6 +1731,27 @@ def to_dtype(x, dst_dtype, use_compute_types=True):
     return result
 
 
+# Dtypes whose physical device representation is IEEE_INT32 and for which the
+# backend has a native integer add/mul intrinsic (addi32toi32 / muli32toi32).
+# torch.int64 tensors are stored as IEEE_INT32 on device (they hold values that
+# fit in 32 bits); torch.int32 is the straightforward case.
+_NATIVE_INTEGER_DTYPES = (torch.int32, torch.int64)
+
+
+def _is_native_integer_tensor(x) -> bool:
+    """Return True if x is an integer tensor whose device format is IEEE_INT32.
+
+    Only torch.int32 and torch.int64 qualify -- both are physically stored as
+    IEEE_INT32 on Spyre and have a backend native intrinsic for add and mul.
+    Scalar constants (int/float) are excluded; they have no get_dtype().
+    """
+    return (
+        not isinstance(x, (int, float))
+        and hasattr(x, "get_dtype")
+        and x.get_dtype() in _NATIVE_INTEGER_DTYPES
+    )
+
+
 def with_int64_as_fp32(fn, *args, convert_output=True):
     """
     Helper to handle int64 operations by promoting operands to fp32.
@@ -1782,6 +1803,20 @@ def with_int64_as_fp32(fn, *args, convert_output=True):
     broadcast=True,
 )
 def lower_add(x, y, *, alpha=1):
+    if _is_native_integer_tensor(x) and _is_native_integer_tensor(y):
+        if alpha != 1:
+            # Keep alpha in the operands' physical integer format so the
+            # backend can use native muli32toi32 followed by addi32toi32.
+            alpha_tensor = lower_full(
+                y.get_size(),
+                float(alpha),
+                dtype=y.get_dtype(),
+                device=y.get_device(),
+            )
+            alpha_tensor.realize()
+            y = lowering.mul(y, alpha_tensor)
+            y.realize()
+        return lowering.add(x, y)
     if alpha != 1:
         alpha_tensor = lower_full(
             y.get_size(),
@@ -1801,6 +1836,8 @@ def lower_add(x, y, *, alpha=1):
     broadcast=True,
 )
 def lower_mul(x, y):
+    if _is_native_integer_tensor(x) and _is_native_integer_tensor(y):
+        return lowering.mul(x, y)
     return with_int64_as_fp32(lowering.mul, x, y)
 
 
