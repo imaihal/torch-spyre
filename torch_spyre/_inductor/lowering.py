@@ -1803,20 +1803,7 @@ def with_int64_as_fp32(fn, *args, convert_output=True):
     broadcast=True,
 )
 def lower_add(x, y, *, alpha=1):
-    if _is_native_integer_tensor(x) and _is_native_integer_tensor(y):
-        if alpha != 1:
-            # Keep alpha in the operands' physical integer format so the
-            # backend can use native muli32toi32 followed by addi32toi32.
-            alpha_tensor = lower_full(
-                y.get_size(),
-                float(alpha),
-                dtype=y.get_dtype(),
-                device=y.get_device(),
-            )
-            alpha_tensor.realize()
-            y = lowering.mul(y, alpha_tensor)
-            y.realize()
-        return lowering.add(x, y)
+    native_integer = _is_native_integer_tensor(x) and _is_native_integer_tensor(y)
     if alpha != 1:
         alpha_tensor = lower_full(
             y.get_size(),
@@ -1825,8 +1812,20 @@ def lower_add(x, y, *, alpha=1):
             device=y.get_device(),
         )
         alpha_tensor.realize()
-        y = with_int64_as_fp32(lowering.mul, y, alpha_tensor)
+        # Materialize alpha as a tensor so native integer scaling can use
+        # muli32toi32; scalar inputs are not native tensor operands.
+        # Keep native integer operands in integer format for muli32toi32.
+        if native_integer:
+            y = lowering.mul(y, alpha_tensor)
+        else:
+            y = with_int64_as_fp32(lowering.mul, y, alpha_tensor)
         y.realize()
+    if native_integer:
+        # Both operands are integer tensors, so SDSC selects addi32toi32.
+        return lowering.add(x, y)
+    # Scalar or non-native operands use the fallback. For int64 tensors it
+    # promotes to fp32, adds, and converts back; without int64 it calls
+    # lowering.add with the original tensor/scalar operands.
     return with_int64_as_fp32(lowering.add, x, y)
 
 
