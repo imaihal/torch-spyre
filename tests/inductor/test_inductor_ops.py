@@ -897,9 +897,17 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(-100, 100, (256,), dtype=torch.int64),
                     torch.randint(-100, 100, (256,), dtype=torch.int64),
                 ),
+                "1d_unaligned_int64": (
+                    torch.randint(-100, 100, (255,), dtype=torch.int64),
+                    torch.randint(-100, 100, (255,), dtype=torch.int64),
+                ),
                 "2d": (
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                ),
+                "2d_unaligned_int64": (
+                    torch.randint(-100, 100, (67, 255), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 255), dtype=torch.int64),
                 ),
                 "3d": (
                     torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
