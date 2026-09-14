@@ -1099,12 +1099,21 @@ def _get_data_format(op, device_dtype):
         if op in ("add", "mul"):
             return DataFormats.SENUINT32
         if op == IDENTITY_OP:
+            # In the long term, SDSC should accept int32 as the data format.
+            # Such re-labeling will become unnecessary.
+            # See backend issue deeptools#4307.
             return DataFormats.IEEE_FP32
     return device_dtype
 
 
 def _get_sdsc_spec_data_format(op, arg_data_format):
-    """Return the SDSC compute format for an operation."""
+    """Return the SDSC compute format for an operation.
+
+    For fp32<->int32 dtype-conversion ops, the SDSC spec must report fp32 as
+    the op's data format, but unlike `_get_data_format`'s IDENTITY_OP case,
+    the int32 tensor descriptor itself stays int32.
+    See backend issue deeptools#4307.
+    """
     if op in (FP32TOINT32_OP, INT32TOFP32_OP, "addi32toi32", "muli32toi32"):
         return DataFormats.IEEE_FP32
     return arg_data_format
@@ -2443,12 +2452,16 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
         else {}
     )
 
+    # Indirect operations place the index tensor first; dispatch from the
+    # original value-tensor format rather than the relabeled SDSC format.
     value_arg_index = 1 if indirect_access_indices else 0
     source_data_format = op_spec.args[value_arg_index].device_dtype
     opfunc = (
         "shuffle"
         if is_relayout
         else _get_op_func(
+            # IEEE_INT32 selects addi32toi32 or muli32toi32; other formats
+            # retain the existing operation mapping.
             op_spec.op,
             op_spec.is_reduction,
             args[-1].scales,
