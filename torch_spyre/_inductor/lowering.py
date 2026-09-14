@@ -1785,7 +1785,7 @@ def with_int64_fallback(fn, *args, convert_output=True):
 
 @register_spyre_lowering(
     torch.ops.aten.add.Tensor,
-    type_promotion_kind=None,
+    type_promotion_kind=lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
     broadcast=True,
 )
 def lower_add(x, y, *, alpha=1):
@@ -1804,22 +1804,16 @@ def lower_add(x, y, *, alpha=1):
             device=y.get_device(),
         )
         alpha_tensor.realize()
-        # Keep native integer scaling in integer format.
-        if native_integer:
-            y = lowering.mul(y, alpha_tensor)
-        else:
-            y = with_int64_fallback(lowering.mul, y, alpha_tensor)
+        y = lowering.mul(y, alpha_tensor)
         y.realize()
-    if native_integer:
-        # SDSC selects addi32toi32 for native integer operands.
-        return lowering.add(x, y)
-    # Use the existing int64 conversion fallback for non-native operands.
-    return with_int64_fallback(lowering.add, x, y)
+    # SDSC selects addi32toi32 for native integer operands; default type
+    # promotion converts non-native operands to float before entry.
+    return lowering.add(x, y)
 
 
 @register_spyre_lowering(
     torch.ops.aten.mul.Tensor,
-    type_promotion_kind=None,
+    type_promotion_kind=lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
     broadcast=True,
 )
 def lower_mul(x, y):
@@ -1829,9 +1823,9 @@ def lower_mul(x, y):
         y = _materialize_native_integer_scalar(y, x)
     elif _is_integer_scalar(x) and _is_native_integer_tensor(y):
         x = _materialize_native_integer_scalar(x, y)
-    if _is_native_integer_tensor(x) and _is_native_integer_tensor(y):
-        return lowering.mul(x, y)
-    return with_int64_fallback(lowering.mul, x, y)
+    # SDSC selects muli32toi32 for native integer operands; default type
+    # promotion converts non-native operands to float before entry.
+    return lowering.mul(x, y)
 
 
 @register_spyre_lowering(
@@ -2010,6 +2004,17 @@ def lower_prod_dim(x, dim, keepdim=False):
         return result
 
     return with_int64_fallback(_prod_dim_impl, x)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.logical_or.default,
+    type_promotion_kind=None,
+    convert_input_to_bool=True,
+    override_return_dtype=torch.bool,
+    broadcast=True,
+)
+def lower_logical_or(x, y):
+    return lowering.logical_or(x, y)
 
 
 @register_spyre_lowering(torch.ops.aten.any.dim, type_promotion_kind=None)
