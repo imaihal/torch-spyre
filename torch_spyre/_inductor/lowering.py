@@ -1783,12 +1783,18 @@ def with_int64_fallback(fn, *args, convert_output=True):
     return output
 
 
+# Use type_promotion_kind=None because DEFAULT cannot assign the appropriate EA.
+# For example, with FP16→FP32 type promotion, DEFAULT performs the promotion
+# before layout propagation, resulting in an IR node with STANDARD EA.
+# In contrast, with None, the FP16 operand survives into the fused body,
+# allowing propagate_layouts to assign the correct DL16_TO_FP32 EA.
 @register_spyre_lowering(
     torch.ops.aten.add.Tensor,
-    type_promotion_kind=lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+    type_promotion_kind=None,
     broadcast=True,
 )
 def lower_add(x, y, *, alpha=1):
+    """
     # Materialise integer scalars as full-size tensors so addi32toi32 sees
     # two fully-tiled operands (a scalar-broadcast layout segfaults dxp_standalone).
     if _is_integer_scalar(y) and _is_native_integer_tensor(x):
@@ -1796,6 +1802,7 @@ def lower_add(x, y, *, alpha=1):
     elif _is_integer_scalar(x) and _is_native_integer_tensor(y):
         x = _materialize_native_integer_scalar(x, y)
     native_integer = _is_native_integer_tensor(x) and _is_native_integer_tensor(y)
+    """
     if alpha != 1:
         alpha_tensor = lower_full(
             y.get_size(),
@@ -1811,9 +1818,14 @@ def lower_add(x, y, *, alpha=1):
     return lowering.add(x, y)
 
 
+# Use type_promotion_kind=None because DEFAULT cannot assign the appropriate EA.
+# For example, with FP16→FP32 type promotion, DEFAULT performs the promotion
+# before layout propagation, resulting in an IR node with STANDARD EA.
+# In contrast, with None, the FP16 operand survives into the fused body,
+# allowing propagate_layouts to assign the correct DL16_TO_FP32 EA.
 @register_spyre_lowering(
     torch.ops.aten.mul.Tensor,
-    type_promotion_kind=lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
+    type_promotion_kind=None,
     broadcast=True,
 )
 def lower_mul(x, y):
