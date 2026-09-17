@@ -1859,7 +1859,8 @@ def lower_add(x, y, *, alpha=1):
     if alpha != 1:
         alpha_tensor = lower_full(
             y.get_size(),
-            alpha if native_integer else float(alpha),
+            # alpha if native_integer else float(alpha),
+            float(alpha),
             dtype=y.get_dtype(),
             device=y.get_device(),
         )
