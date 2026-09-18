@@ -1235,15 +1235,30 @@ def splice_while_loops(graph) -> None:
             # as kernel arguments, which SpyreStream::launch rejects at runtime
             # ("argument N must be on Spyre device, got cpu").  Filter those CPU
             # ops out; they remain in graph.operations for dead-code elimination.
-            spyre_group_ops = [
-                op
+            #
+            # Only apply this filter when the group actually contains non-CPU
+            # ops (i.e. on a real Spyre device). On a CPU-only test fixture
+            # every body op reports device='cpu', so filtering would remove the
+            # actual compute ops and leave a non-contiguous shell of
+            # DynamicScalar/AssertScalar/ExternKernelOut ops that
+            # _validate_contiguous rejects. When all ops share the same device
+            # the group is already contiguous and no filtering is needed.
+            _has_non_cpu = any(
+                op.get_device() is not None and op.get_device().type != "cpu"
                 for op in group_ops
-                if not (
-                    isinstance(op, ir.ComputedBuffer)
-                    and op.get_device() is not None
-                    and op.get_device().type == "cpu"
-                )
-            ]
+            )
+            if _has_non_cpu:
+                spyre_group_ops = [
+                    op
+                    for op in group_ops
+                    if not (
+                        isinstance(op, ir.ComputedBuffer)
+                        and op.get_device() is not None
+                        and op.get_device().type == "cpu"
+                    )
+                ]
+            else:
+                spyre_group_ops = list(group_ops)
 
             levels = [(hint_id, result.trip_count)]
             coarse_tile_pre_stickify(
