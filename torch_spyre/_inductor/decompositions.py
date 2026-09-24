@@ -3661,3 +3661,9 @@ def spyre_true_divide(x: torch.Tensor, y) -> torch.Tensor:
     yf = _adapt_dtype(y, to_dtype=torch.float32, only_if=torch.int64)
     xf, yf = _broadcast_if_tensors(xf, yf)
     return torch.ops.prims.div(xf, yf)
+
+
+@register_spyre_decompositions([torch.ops.aten.floor_divide])
+def spyre_floor_divide(x: torch.Tensor, y) -> torch.Tensor:
+    """Decompose aten.floor_divide for Spyre."""
+    return spyre_div(x, y, rounding_mode="floor")
