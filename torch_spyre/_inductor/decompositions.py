@@ -3652,15 +3652,8 @@ def spyre_div(x: torch.Tensor, y, *, rounding_mode=None) -> torch.Tensor:
     [torch.ops.aten.true_divide.Tensor, torch.ops.aten.true_divide.Scalar]
 )
 def spyre_true_divide(x: torch.Tensor, y) -> torch.Tensor:
-    """Decompose aten.true_divide for Spyre (always true division).
-
-    Adapts int64 inputs to fp32 via `_adapt_dtype`, leaving other dtypes
-    unchanged for native division. `y` may be a Tensor or a Python scalar.
-    """
-    xf = _adapt_dtype(x, to_dtype=torch.float32, only_if=torch.int64)
-    yf = _adapt_dtype(y, to_dtype=torch.float32, only_if=torch.int64)
-    xf, yf = _broadcast_if_tensors(xf, yf)
-    return torch.ops.prims.div(xf, yf)
+    """Decompose aten.true_divide for Spyre (always true division)."""
+    return spyre_div(x, y)
 
 
 @register_spyre_decompositions([torch.ops.aten.floor_divide])
