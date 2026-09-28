@@ -3376,12 +3376,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "param_sets": {
                 "1d": (cached_randn((1024,), dtype=torch.float16), 3.0),
                 "1d_fp32": (cached_randn((1024,), dtype=torch.float32), 3.0),
-                "1d_int64": (torch.randint(-100, 100, (1024,), dtype=torch.int64), 3.0),
+                "1d_int64": (torch.randint(-100, 100, (1024,), dtype=torch.int64), 3),
                 "2d": (cached_randn((512, 1024), dtype=torch.float16), 1.0),
                 "2d_fp32": (cached_randn((512, 1024), dtype=torch.float32), 1.0),
                 "2d_int64": (
                     torch.randint(-100, 100, (512, 1024), dtype=torch.int64),
-                    1.0,
+                    1,
                 ),
                 "3d": (cached_randn((8, 64, 1024), dtype=torch.float16), 1.5),
                 "4d": (cached_randn((2, 4, 64, 1024), dtype=torch.float16), 2.4),
