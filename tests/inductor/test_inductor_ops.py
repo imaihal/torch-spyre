@@ -915,8 +915,20 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(-100, 100, (256,), dtype=torch.int64),
                     torch.randint(-100, 100, (256,), dtype=torch.int64),
                 ),
+                "1d_bcast": (
+                    torch.randint(-100, 100, (1,), dtype=torch.int64),
+                    torch.randint(-100, 100, (256,), dtype=torch.int64),
+                ),
                 "2d": (
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                ),
+                "2d_batch_bcast": (
+                    torch.randint(-100, 100, (1, 256), dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                ),
+                "2d_stick_bcast": (
+                    torch.randint(-100, 100, (67, 1), dtype=torch.int64),
                     torch.randint(-100, 100, (67, 256), dtype=torch.int64),
                 ),
                 "3d": (
@@ -3363,7 +3375,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
             "param_sets": {
                 "1d": (cached_randn((1024,), dtype=torch.float16), 3.0),
+                "1d_fp32": (cached_randn((1024,), dtype=torch.float32), 3.0),
+                "1d_int64": (cached_randn((1024,), dtype=torch.int64), 3.0),
                 "2d": (cached_randn((512, 1024), dtype=torch.float16), 1.0),
+                "2d_fp32": (cached_randn((512, 1024), dtype=torch.floatfp32), 1.0),
+                "2d_int64": (cached_randn((512, 1024), dtype=torch.int64), 1.0),
                 "3d": (cached_randn((8, 64, 1024), dtype=torch.float16), 1.5),
                 "4d": (cached_randn((2, 4, 64, 1024), dtype=torch.float16), 2.4),
             },

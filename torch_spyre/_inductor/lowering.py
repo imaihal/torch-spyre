@@ -1903,15 +1903,6 @@ def with_int64_fallback(fn, *args, convert_output=True):
     broadcast=True,
 )
 def lower_add(x, y, *, alpha=1):
-    """
-    # Materialise integer scalars as full-size tensors so addi32toi32 sees
-    # two fully-tiled operands (a scalar-broadcast layout segfaults dxp_standalone).
-    if _is_integer_scalar(y) and _is_native_integer_tensor(x):
-        y = _materialize_native_integer_scalar(y, x)
-    elif _is_integer_scalar(x) and _is_native_integer_tensor(y):
-        x = _materialize_native_integer_scalar(x, y)
-    native_integer = _is_native_integer_tensor(x) and _is_native_integer_tensor(y)
-    """
     if alpha != 1:
         alpha_tensor = lower_full(
             y.get_size(),
@@ -1939,12 +1930,6 @@ def lower_add(x, y, *, alpha=1):
     broadcast=True,
 )
 def lower_mul(x, y):
-    # Same scalar materialisation as lower_add: muli32toi32 requires both
-    # operands to be fully-tiled tensor buffers.
-    if _is_integer_scalar(y) and _is_native_integer_tensor(x):
-        y = _materialize_native_integer_scalar(y, x)
-    elif _is_integer_scalar(x) and _is_native_integer_tensor(y):
-        x = _materialize_native_integer_scalar(x, y)
     # SDSC selects muli32toi32 for native integer operands; default type
     # promotion converts non-native operands to float before entry.
     return lowering.mul(x, y)
