@@ -1653,6 +1653,13 @@ def _get_op_func(
     output_scales: dict,
     data_format: DataFormats | None = None,
 ) -> str:
+    """Return the SDSC opfunc string for an operation.
+
+    For IEEE_INT32 tensors, dispatches ``add`` -> ``addi32toi32`` and
+    ``mul`` -> ``muli32toi32`` (the device's native 32-bit integer intrinsics).
+    Non-stick reductions append the ``nonstick`` suffix.  All other ops map to
+    their op name unchanged.
+    """
     if data_format == DataFormats.IEEE_INT32:
         if op == "add":
             return "addi32toi32"

@@ -1810,50 +1810,6 @@ def to_dtype(x, dst_dtype, use_compute_types=True):
     )
 
 
-# Dtypes whose physical device representation is IEEE_INT32 and for which the
-# backend has a native integer add/mul intrinsic (addi32toi32 / muli32toi32).
-# torch.int64 tensors are stored as IEEE_INT32 on device (they hold values that
-# fit in 32 bits); torch.int32 is the straightforward case.
-_NATIVE_INTEGER_DTYPES = (torch.int32, torch.int64)
-
-
-def _is_native_integer_tensor(x) -> bool:
-    """Return True if x is an integer tensor whose device format is IEEE_INT32.
-
-    Only torch.int32 and torch.int64 qualify -- both are physically stored as
-    IEEE_INT32 on Spyre and have a backend native intrinsic for add and mul.
-    Scalar constants are excluded: addi32toi32 / muli32toi32 require both
-    operands to be fully-tiled tensor buffers.  Use _is_integer_scalar to detect
-    Python int scalars, and _materialize_native_integer_scalar to expand them to
-    a full-size tensor before selecting the native path.
-    """
-    return (
-        not isinstance(x, (bool, int, float))
-        and hasattr(x, "get_dtype")
-        and x.get_dtype() in _NATIVE_INTEGER_DTYPES
-    )
-
-
-def _is_integer_scalar(x) -> bool:
-    """Return True for Python int scalars that can use the native integer path."""
-    return isinstance(x, int) and not isinstance(x, bool)
-
-
-def _materialize_native_integer_scalar(value: int, tensor) -> object:
-    """Expand an integer scalar to a full-size constant tensor matching tensor's shape.
-
-    Uses lower_full (which now supports int32/int64 via SpyreConstantFallback) so
-    that the result has the correct fully-tiled device layout expected by
-    addi32toi32 / muli32toi32.
-    """
-    return lower_full(
-        tensor.get_size(),
-        value,
-        dtype=tensor.get_dtype(),
-        device=tensor.get_device(),
-    )
-
-
 def with_int64_fallback(fn, *args, convert_output=True):
     """
     Helper to handle int64 operations by converting to fp32.
@@ -1906,7 +1862,6 @@ def lower_add(x, y, *, alpha=1):
     if alpha != 1:
         alpha_tensor = lower_full(
             y.get_size(),
-            # alpha if native_integer else float(alpha),
             float(alpha),
             dtype=y.get_dtype(),
             device=y.get_device(),
