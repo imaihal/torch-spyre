@@ -303,8 +303,10 @@ def eager_fallback(op, *args, **kwargs):
 def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     """Give a lowering result a synthetic ``target`` origin FX node, so Spyre
     layout passes (which key off ``op.data.origins[].target``) recognize it even
-    when the lowering was called directly, without an FX node of its own. No-op
-    if a ``target`` origin already exists.
+    when the lowering was called directly, without an FX node of its own.  Also
+    registers the result in V.graph.env under the synthetic node so that
+    split_multi_ops can locate it by buffer name via find_fx_node.  No-op if a
+    ``target`` origin already exists.
     """
 
     def _realized_buffer(node):
@@ -327,6 +329,9 @@ def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     # buf.data is a frozen Loops; override its origins via object.__setattr__.
     object.__setattr__(buf.data, "origins", OrderedSet([fx_node]))
     buf.origins = OrderedSet([fx_node])
+    # Register in V.graph.env so split_multi_ops' find_fx_node can locate this
+    # buffer by name (find_fx_node searches env for fx_node -> TensorBox pairs).
+    V.graph.env[fx_node] = result
 
 
 @register_spyre_lowering(torch.ops.spyre.scaled_mm.default)
@@ -1941,6 +1946,12 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
     # int64 op int64 -> int64, but int64 op float -> float).
     both_int64 = _is_int64(x) and _is_int64(y)
 
+    # Synthetic target used to give all intermediate realized buffers an FX
+    # origin so that split_multi_ops can find them by buffer name.  All
+    # intermediate buffers created inside this lowering are attributed to the
+    # same aten.div node that triggered this lowering.
+    _div_target = torch.ops.aten.div.Tensor
+
     if rounding_mode == "floor":
         # Convert int64 tensor inputs to fp32 so div, floor, and the correction
         # arithmetic all operate on floats.  lowering.div's INT_TO_FLOAT
@@ -1949,17 +1960,25 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         yf = to_dtype(y, torch.float32) if _is_int64(y) else y
         qf = lowering.div(xf, yf)
         qf.realize()
+        _ensure_synthetic_origin(qf, _div_target, ())
         qf = lowering.floor(qf)
         qf.realize()
+        _ensure_synthetic_origin(qf, _div_target, ())
         # Quotient correction: correct floor-division satisfies 0 <= r < yf.
         # Assuming at most +/-1 quotient error from the divider:
         #   r >= yf  => qf underestimated by 1
         #   r <  0   => qf overestimated by 1
+        # lowering.ge / lowering.lt are not exported by name; look them up from
+        # the lowerings dict (the registered tensor-level wrapped closures).
+        _ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
+        _lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
         r = lowering.sub(xf, lowering.mul(qf, yf))
         r.realize()
-        qf = lowering.where(lowering.ge(r, yf), lowering.add(qf, 1.0), qf)
+        _ensure_synthetic_origin(r, _div_target, ())
+        qf = lowering.where(_ge(r, yf), lowering.add(qf, 1.0), qf)
         qf.realize()
-        qf = lowering.where(lowering.lt(r, 0.0), lowering.sub(qf, 1.0), qf)
+        _ensure_synthetic_origin(qf, _div_target, ())
+        qf = lowering.where(_lt(r, 0.0), lowering.sub(qf, 1.0), qf)
         if both_int64:
             return to_dtype(qf, torch.int64)
         return qf
@@ -1970,6 +1989,7 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         yf = to_dtype(y, torch.float32) if _is_int64(y) else y
         qf = lowering.div(xf, yf)
         qf.realize()
+        _ensure_synthetic_origin(qf, _div_target, ())
         qf = lowering.trunc(qf)
         if both_int64:
             return to_dtype(qf, torch.int64)
@@ -1985,25 +2005,29 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
 
 
 @register_spyre_lowering(
-    [
-        torch.ops.aten.div.Tensor,
-        torch.ops.aten.div.Tensor_mode,
-        torch.ops.aten.div.Scalar,
-        torch.ops.aten.div.Scalar_mode,
-        torch.ops.aten.true_divide.Tensor,
-        torch.ops.aten.true_divide.Scalar,
-    ],
-    type_promotion_kind=None,
-    broadcast=True,
+    torch.ops.aten.div.Tensor, type_promotion_kind=None, broadcast=True
+)
+@register_spyre_lowering(
+    torch.ops.aten.div.Tensor_mode, type_promotion_kind=None, broadcast=True
+)
+@register_spyre_lowering(
+    torch.ops.aten.div.Scalar, type_promotion_kind=None, broadcast=True
+)
+@register_spyre_lowering(
+    torch.ops.aten.div.Scalar_mode, type_promotion_kind=None, broadcast=True
+)
+@register_spyre_lowering(
+    torch.ops.aten.true_divide.Tensor, type_promotion_kind=None, broadcast=True
+)
+@register_spyre_lowering(
+    torch.ops.aten.true_divide.Scalar, type_promotion_kind=None, broadcast=True
 )
 def lower_div(x, y, *, rounding_mode=None):
     return _lower_div_impl(x, y, rounding_mode=rounding_mode)
 
 
 @register_spyre_lowering(
-    torch.ops.aten.floor_divide,
-    type_promotion_kind=None,
-    broadcast=True,
+    torch.ops.aten.floor_divide, type_promotion_kind=None, broadcast=True
 )
 def lower_floor_divide(x, y):
     # aten.floor_divide has no rounding_mode parameter; always floor division.
