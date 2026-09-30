@@ -1914,6 +1914,102 @@ def lower_sub(x, y, *, alpha=1):
     return with_int64_fallback(lowering.sub, x, y)
 
 
+def _lower_div_impl(x, y, *, rounding_mode=None):
+    """Shared implementation for lower_div and lower_floor_divide.
+
+    By registering a lowering (rather than a decomposition), aten.div appears as
+    a single op in the FX graph.  All multi-step logic (floor correction, trunc)
+    is performed here at lowering time, avoiding any fake-tensor dtype inference
+    issue — aten.div's own op schema handles dtype inference during tracing.
+
+    Mirrors the with_int64_fallback pattern used by lower_add/sub/mul:
+      - rounding_mode=None  : with_int64_fallback(lowering.div, ..., convert_output=False)
+      - rounding_mode="floor"/"trunc": manual to_dtype for int64 inputs, then
+        lowering.div (INT_TO_FLOAT in its transform_args is a no-op on fp32),
+        then floor/trunc, then reconvert to int64 if both inputs were int64.
+
+    Type promotion for int64:
+      - rounding_mode=None  : result is always float (PyTorch true division).
+      - rounding_mode="floor"/"trunc": result is int64 only when BOTH inputs are
+        int64; mixed int64/float stays float (matches PyTorch type promotion).
+    """
+
+    def _is_int64(v):
+        return hasattr(v, "get_dtype") and v.get_dtype() == torch.int64
+
+    # Output is int64 only when both tensor inputs are int64 (type promotion:
+    # int64 op int64 -> int64, but int64 op float -> float).
+    both_int64 = _is_int64(x) and _is_int64(y)
+
+    if rounding_mode == "floor":
+        # Convert int64 tensor inputs to fp32 so div, floor, and the correction
+        # arithmetic all operate on floats.  lowering.div's INT_TO_FLOAT
+        # transform_args is a no-op on the already-fp32 inputs.
+        xf = to_dtype(x, torch.float32) if _is_int64(x) else x
+        yf = to_dtype(y, torch.float32) if _is_int64(y) else y
+        qf = lowering.div(xf, yf)
+        qf.realize()
+        qf = lowering.floor(qf)
+        qf.realize()
+        # Quotient correction: correct floor-division satisfies 0 <= r < yf.
+        # Assuming at most +/-1 quotient error from the divider:
+        #   r >= yf  => qf underestimated by 1
+        #   r <  0   => qf overestimated by 1
+        r = lowering.sub(xf, lowering.mul(qf, yf))
+        r.realize()
+        qf = lowering.where(lowering.ge(r, yf), lowering.add(qf, 1.0), qf)
+        qf.realize()
+        qf = lowering.where(lowering.lt(r, 0.0), lowering.sub(qf, 1.0), qf)
+        if both_int64:
+            return to_dtype(qf, torch.int64)
+        return qf
+
+    elif rounding_mode == "trunc":
+        # Same int64->fp32 pattern; lowering.trunc on fp32 truncates toward zero.
+        xf = to_dtype(x, torch.float32) if _is_int64(x) else x
+        yf = to_dtype(y, torch.float32) if _is_int64(y) else y
+        qf = lowering.div(xf, yf)
+        qf.realize()
+        qf = lowering.trunc(qf)
+        if both_int64:
+            return to_dtype(qf, torch.int64)
+        return qf
+
+    else:
+        # rounding_mode=None (true division): result is always float, even for
+        # int64 inputs — consistent with PyTorch semantics.
+        # Symmetric with lower_add/sub/mul: with_int64_fallback converts int64
+        # tensor args to fp32 and calls lowering.div; convert_output=False keeps
+        # the result as float instead of reconverting to int64.
+        return with_int64_fallback(lowering.div, x, y, convert_output=False)
+
+
+@register_spyre_lowering(
+    [
+        torch.ops.aten.div.Tensor,
+        torch.ops.aten.div.Tensor_mode,
+        torch.ops.aten.div.Scalar,
+        torch.ops.aten.div.Scalar_mode,
+        torch.ops.aten.true_divide.Tensor,
+        torch.ops.aten.true_divide.Scalar,
+    ],
+    type_promotion_kind=None,
+    broadcast=True,
+)
+def lower_div(x, y, *, rounding_mode=None):
+    return _lower_div_impl(x, y, rounding_mode=rounding_mode)
+
+
+@register_spyre_lowering(
+    torch.ops.aten.floor_divide,
+    type_promotion_kind=None,
+    broadcast=True,
+)
+def lower_floor_divide(x, y):
+    # aten.floor_divide has no rounding_mode parameter; always floor division.
+    return _lower_div_impl(x, y, rounding_mode="floor")
+
+
 @register_spyre_lowering(
     torch.ops.aten.minimum.default,
     type_promotion_kind=None,
