@@ -6330,6 +6330,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
             "expect_fail": [
+                "trunc_int64_rand_2d",
                 "trunc_fp16_rand_2d",
                 "trunc_fp32_rand_2d",
             ],

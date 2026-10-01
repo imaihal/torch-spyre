@@ -303,10 +303,8 @@ def eager_fallback(op, *args, **kwargs):
 def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     """Give a lowering result a synthetic ``target`` origin FX node, so Spyre
     layout passes (which key off ``op.data.origins[].target``) recognize it even
-    when the lowering was called directly, without an FX node of its own.  Also
-    registers the result in V.graph.env under the synthetic node so that
-    split_multi_ops can locate it by buffer name via find_fx_node.  No-op if a
-    ``target`` origin already exists.
+    when the lowering was called directly, without an FX node of its own. No-op
+    if a ``target`` origin already exists.
     """
 
     def _realized_buffer(node):
@@ -329,9 +327,6 @@ def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     # buf.data is a frozen Loops; override its origins via object.__setattr__.
     object.__setattr__(buf.data, "origins", OrderedSet([fx_node]))
     buf.origins = OrderedSet([fx_node])
-    # Register in V.graph.env so split_multi_ops' find_fx_node can locate this
-    # buffer by name (find_fx_node searches env for fx_node -> TensorBox pairs).
-    V.graph.env[fx_node] = result
 
 
 @register_spyre_lowering(torch.ops.spyre.scaled_mm.default)
@@ -1815,25 +1810,6 @@ def to_dtype(x, dst_dtype, use_compute_types=True):
     )
 
 
-@register_spyre_lowering(torch.ops.spyre.adapt_dtype.default, type_promotion_kind=None)
-def lower_adapt_dtype(x, dtype, only_if=None):
-    if only_if is not None and x.get_dtype() != only_if:
-        return x
-
-    if x.get_dtype() == dtype:
-        return x
-    return to_dtype(x, dtype)
-
-
-@register_spyre_lowering(
-    torch.ops.spyre.adapt_dtype_scalar.default, type_promotion_kind=None
-)
-def lower_adapt_dtype_scalar(x, dtype, only_if=None):
-    if only_if is None or (only_if == torch.int64 and isinstance(x, int)):
-        return float(x) if dtype.is_floating_point else int(x)
-    return x
-
-
 def with_int64_fallback(fn, *args, convert_output=True):
     """
     Helper to handle int64 operations by converting to fp32.
@@ -1919,28 +1895,46 @@ def lower_sub(x, y, *, alpha=1):
     return with_int64_fallback(lowering.sub, x, y)
 
 
+def _realize_step(t):
+    """Realize t as a fusion barrier and return t, for use in multi-step lowerings."""
+    t.realize()
+    return t
+
+
 def _lower_div_impl(x, y, *, rounding_mode=None):
     """Shared implementation for lower_div and lower_floor_divide.
 
     By registering a lowering (rather than a decomposition), aten.div appears as
-    a single op in the FX graph.  All multi-step logic (floor correction, trunc)
-    is performed here at lowering time, avoiding any fake-tensor dtype inference
+    a single op in the FX graph.  All multi-step logic (floor correction) is
+    performed here at lowering time, avoiding any fake-tensor dtype inference
     issue — aten.div's own op schema handles dtype inference during tracing.
 
     Mirrors the with_int64_fallback pattern used by lower_add/sub/mul:
       - rounding_mode=None  : with_int64_fallback(lowering.div, ..., convert_output=False)
-      - rounding_mode="floor"/"trunc": manual to_dtype for int64 inputs, then
-        lowering.div (INT_TO_FLOAT in its transform_args is a no-op on fp32),
-        then floor/trunc, then reconvert to int64 if both inputs were int64.
+      - rounding_mode="floor": _to_float for int64 inputs, then lowering.div
+        (INT_TO_FLOAT in its transform_args is a no-op on fp32), then floor +
+        quotient correction, then reconvert to int64 if both inputs were int64.
+      - rounding_mode="trunc": not yet implemented (raises Unsupported);
+        see TODO: Enable with PR#3610.
 
     Type promotion for int64:
       - rounding_mode=None  : result is always float (PyTorch true division).
-      - rounding_mode="floor"/"trunc": result is int64 only when BOTH inputs are
+      - rounding_mode="floor": result is int64 only when BOTH inputs are
         int64; mixed int64/float stays float (matches PyTorch type promotion).
     """
 
     def _is_int64(v):
-        return hasattr(v, "get_dtype") and v.get_dtype() == torch.int64
+        if hasattr(v, "get_dtype"):
+            return v.get_dtype() == torch.int64
+        return isinstance(v, int)
+
+    def _to_float(v):
+        """Convert v to fp32: to_dtype for tensors, float() for scalar ints."""
+        if not _is_int64(v):
+            return v
+        if hasattr(v, "get_dtype"):
+            return to_dtype(v, torch.float32)
+        return float(v)
 
     # Output is int64 only when both tensor inputs are int64 (type promotion:
     # int64 op int64 -> int64, but int64 op float -> float).
@@ -1956,14 +1950,16 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # Convert int64 tensor inputs to fp32 so div, floor, and the correction
         # arithmetic all operate on floats.  lowering.div's INT_TO_FLOAT
         # transform_args is a no-op on the already-fp32 inputs.
-        xf = to_dtype(x, torch.float32) if _is_int64(x) else x
-        yf = to_dtype(y, torch.float32) if _is_int64(y) else y
-        qf = lowering.div(xf, yf)
-        qf.realize()
-        _ensure_synthetic_origin(qf, _div_target, ())
-        qf = lowering.floor(qf)
-        qf.realize()
-        _ensure_synthetic_origin(qf, _div_target, ())
+        # For int64, to_dtype produces a FallbackKernel (born already realized),
+        # so no explicit realize() or _ensure_synthetic_origin is needed here.
+        xf = _to_float(x)
+        yf = _to_float(y)
+        # Each _realize_step call is a fusion barrier: it prevents the step from
+        # being inlined into the next op, keeping every buffer as a single-op
+        # ComputedBuffer that split_multi_ops can skip (Spyre requires one op per
+        # SDSC).
+        qf = _realize_step(lowering.div(xf, yf))
+        qf = _realize_step(lowering.floor(qf))
         # Quotient correction: correct floor-division satisfies 0 <= r < yf.
         # Assuming at most +/-1 quotient error from the divider:
         #   r >= yf  => qf underestimated by 1
@@ -1972,28 +1968,43 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # the lowerings dict (the registered tensor-level wrapped closures).
         _ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
         _lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
-        r = lowering.sub(xf, lowering.mul(qf, yf))
-        r.realize()
-        _ensure_synthetic_origin(r, _div_target, ())
-        qf = lowering.where(_ge(r, yf), lowering.add(qf, 1.0), qf)
-        qf.realize()
-        _ensure_synthetic_origin(qf, _div_target, ())
-        qf = lowering.where(_lt(r, 0.0), lowering.sub(qf, 1.0), qf)
+        _mul = _realize_step(lowering.mul(qf, yf))
+        r = _realize_step(lowering.sub(xf, _mul))
+        ge = _realize_step(_ge(r, yf))
+        lt = _realize_step(_lt(r, 0.0))
+        _add = _realize_step(lowering.add(qf, 1.0))
+        _sub = _realize_step(lowering.sub(qf, 1.0))
+        qf = _realize_step(lowering.where(ge, _add, qf))
+        qf = lowering.where(lt, _sub, qf)  # return value — no realize needed
         if both_int64:
             return to_dtype(qf, torch.int64)
         return qf
 
     elif rounding_mode == "trunc":
-        # Same int64->fp32 pattern; lowering.trunc on fp32 truncates toward zero.
-        xf = to_dtype(x, torch.float32) if _is_int64(x) else x
-        yf = to_dtype(y, torch.float32) if _is_int64(y) else y
-        qf = lowering.div(xf, yf)
-        qf.realize()
-        _ensure_synthetic_origin(qf, _div_target, ())
-        qf = lowering.trunc(qf)
-        if both_int64:
-            return to_dtype(qf, torch.int64)
-        return qf
+        raise Unsupported("div with rounding_mode='trunc' is not yet implemented")
+        # TODO: Enable with PR#3610.
+        # xf = _to_float(x)
+        # yf = _to_float(y)
+        # qf = _realize_step(lowering.div(xf, yf))
+        # qf = _realize_step(lowering.trunc(qf))
+        # # Quotient correction: correct trunc-division satisfies -yf < r < yf.
+        # # Assuming at most +/-1 quotient error from the divider:
+        # #   r >= yf   => qf underestimated by 1
+        # #   r <= -yf  => qf overestimated by 1
+        # _ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
+        # _le = lowering.lowerings[torch.ops.aten.le.Tensor]
+        # _mul = _realize_step(lowering.mul(qf, yf))
+        # r    = _realize_step(lowering.sub(xf, _mul))
+        # neg_yf = _realize_step(lowering.neg(yf))
+        # ge   = _realize_step(_ge(r, yf))
+        # le   = _realize_step(_le(r, neg_yf))
+        # _add = _realize_step(lowering.add(qf, 1.0))
+        # _sub = _realize_step(lowering.sub(qf, 1.0))
+        # qf   = _realize_step(lowering.where(ge, _add, qf))
+        # qf   = lowering.where(le, _sub, qf)   # return value — no realize needed
+        # if both_int64:
+        #     return to_dtype(qf, torch.int64)
+        # return qf
 
     else:
         # rounding_mode=None (true division): result is always float, even for
