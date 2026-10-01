@@ -1904,23 +1904,12 @@ def _realize_step(t):
 def _lower_div_impl(x, y, *, rounding_mode=None):
     """Shared implementation for lower_div and lower_floor_divide.
 
-    By registering a lowering (rather than a decomposition), aten.div appears as
-    a single op in the FX graph.  All multi-step logic (floor correction) is
-    performed here at lowering time, avoiding any fake-tensor dtype inference
-    issue — aten.div's own op schema handles dtype inference during tracing.
-
-    Mirrors the with_int64_fallback pattern used by lower_add/sub/mul:
-      - rounding_mode=None  : with_int64_fallback(lowering.div, ..., convert_output=False)
-      - rounding_mode="floor": _to_float for int64 inputs, then lowering.div
-        (INT_TO_FLOAT in its transform_args is a no-op on fp32), then floor +
-        quotient correction, then reconvert to int64 if both inputs were int64.
-      - rounding_mode="trunc": not yet implemented (raises Unsupported);
-        see TODO: Enable with PR#3610.
-
-    Type promotion for int64:
-      - rounding_mode=None  : result is always float (PyTorch true division).
-      - rounding_mode="floor": result is int64 only when BOTH inputs are
-        int64; mixed int64/float stays float (matches PyTorch type promotion).
+    - rounding_mode=None  : true division; result is always float, even for
+      int64 inputs (matches PyTorch semantics).
+    - rounding_mode="floor": converts int64 inputs to fp32, computes
+      floor(x/y) with quotient correction, then converts back to int64 only
+      when both inputs were int64.
+    - rounding_mode="trunc": not yet implemented (raises Unsupported).
     """
 
     def _is_int64(v):
@@ -1940,16 +1929,9 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
     # int64 op int64 -> int64, but int64 op float -> float).
     both_int64 = _is_int64(x) and _is_int64(y)
 
-    # Synthetic target used to give all intermediate realized buffers an FX
-    # origin so that split_multi_ops can find them by buffer name.  All
-    # intermediate buffers created inside this lowering are attributed to the
-    # same aten.div node that triggered this lowering.
-    _div_target = torch.ops.aten.div.Tensor
-
     if rounding_mode == "floor":
         # Convert int64 tensor inputs to fp32 so div, floor, and the correction
-        # arithmetic all operate on floats.  lowering.div's INT_TO_FLOAT
-        # transform_args is a no-op on the already-fp32 inputs.
+        # arithmetic all operate on floats.
         # For int64, to_dtype produces a FallbackKernel (born already realized),
         # so no explicit realize() or _ensure_synthetic_origin is needed here.
         xf = _to_float(x)
@@ -1964,18 +1946,16 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # Assuming at most +/-1 quotient error from the divider:
         #   r >= yf  => qf underestimated by 1
         #   r <  0   => qf overestimated by 1
-        # lowering.ge / lowering.lt are not exported by name; look them up from
-        # the lowerings dict (the registered tensor-level wrapped closures).
-        _ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
-        _lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
-        _mul = _realize_step(lowering.mul(qf, yf))
-        r = _realize_step(lowering.sub(xf, _mul))
-        ge = _realize_step(_ge(r, yf))
-        lt = _realize_step(_lt(r, 0.0))
-        _add = _realize_step(lowering.add(qf, 1.0))
-        _sub = _realize_step(lowering.sub(qf, 1.0))
-        qf = _realize_step(lowering.where(ge, _add, qf))
-        qf = lowering.where(lt, _sub, qf)  # return value — no realize needed
+        aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
+        aten_lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
+        prod = _realize_step(lowering.mul(qf, yf))
+        rem = _realize_step(lowering.sub(xf, prod))
+        over = _realize_step(aten_ge(rem, yf))
+        under = _realize_step(aten_lt(rem, 0.0))
+        qf_p1 = _realize_step(lowering.add(qf, 1.0))
+        qf_m1 = _realize_step(lowering.sub(qf, 1.0))
+        qf = _realize_step(lowering.where(over, qf_p1, qf))
+        qf = lowering.where(under, qf_m1, qf)  # return value — no realize needed
         if both_int64:
             return to_dtype(qf, torch.int64)
         return qf
@@ -1991,17 +1971,17 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # # Assuming at most +/-1 quotient error from the divider:
         # #   r >= yf   => qf underestimated by 1
         # #   r <= -yf  => qf overestimated by 1
-        # _ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
-        # _le = lowering.lowerings[torch.ops.aten.le.Tensor]
-        # _mul = _realize_step(lowering.mul(qf, yf))
-        # r    = _realize_step(lowering.sub(xf, _mul))
+        # aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
+        # aten_le = lowering.lowerings[torch.ops.aten.le.Tensor]
+        # prod   = _realize_step(lowering.mul(qf, yf))
+        # rem    = _realize_step(lowering.sub(xf, prod))
         # neg_yf = _realize_step(lowering.neg(yf))
-        # ge   = _realize_step(_ge(r, yf))
-        # le   = _realize_step(_le(r, neg_yf))
-        # _add = _realize_step(lowering.add(qf, 1.0))
-        # _sub = _realize_step(lowering.sub(qf, 1.0))
-        # qf   = _realize_step(lowering.where(ge, _add, qf))
-        # qf   = lowering.where(le, _sub, qf)   # return value — no realize needed
+        # over   = _realize_step(aten_ge(rem, yf))
+        # under  = _realize_step(aten_le(rem, neg_yf))
+        # qf_p1  = _realize_step(lowering.add(qf, 1.0))
+        # qf_m1  = _realize_step(lowering.sub(qf, 1.0))
+        # qf     = _realize_step(lowering.where(over, qf_p1, qf))
+        # qf     = lowering.where(under, qf_m1, qf)  # return value — no realize needed
         # if both_int64:
         #     return to_dtype(qf, torch.int64)
         # return qf
