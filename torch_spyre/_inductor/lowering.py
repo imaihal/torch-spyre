@@ -1861,6 +1861,20 @@ def _promoted_dtype(*dtypes, kind):
     )[1]
 
 
+def _cast_to_dtype(v, dtype):
+    """Cast v to dtype for use in a pointwise lowering.
+
+    - Tensor operands: cast via to_dtype if not already at dtype, else return as-is.
+    - Python int scalars: coerce to float() when dtype is floating-point.
+    - Everything else (Python float, already-correct tensor, etc.): return unchanged.
+    """
+    if hasattr(v, "get_dtype"):
+        return v if v.get_dtype() == dtype else to_dtype(v, dtype)
+    if dtype.is_floating_point and isinstance(v, int):
+        return float(v)
+    return v
+
+
 @register_spyre_lowering(torch.ops.aten.where.self, type_promotion_kind=None)
 def lower_where(condition, self, other):
     # where3 requires all operands to share the same stick size.
@@ -2052,17 +2066,9 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
     """
     val_dtype, result_dtype = _div_operand_dtype(x, y)
 
-    def convert(v):
-        if val_dtype is None:
-            return v
-        if hasattr(v, "get_dtype"):
-            return v if v.get_dtype() == val_dtype else to_dtype(v, val_dtype)
-        if val_dtype.is_floating_point and isinstance(v, int):
-            return float(v)
-        return v
-
-    x = convert(x)
-    y = convert(y)
+    if val_dtype is not None:
+        x = _cast_to_dtype(x, val_dtype)
+        y = _cast_to_dtype(y, val_dtype)
 
     if rounding_mode == "floor":
         # All operands are now at val_dtype (fp32 for integer inputs).
@@ -2324,16 +2330,9 @@ def _lower_cmp_impl(x, y, pointwise_fn):
 
     operand_dtype = _cmp_operand_dtype(tensors)
 
-    def convert(v):
-        if hasattr(v, "get_dtype"):
-            if v.get_dtype() == operand_dtype:
-                return v
-            return to_dtype(v, operand_dtype)
-        if operand_dtype.is_floating_point and isinstance(v, int):
-            return float(v)
-        return v
-
-    return pointwise_fn(convert(x), convert(y))
+    return pointwise_fn(
+        _cast_to_dtype(x, operand_dtype), _cast_to_dtype(y, operand_dtype)
+    )
 
 
 def _register_cmp_lowerings(aten_op, op_name: str):
