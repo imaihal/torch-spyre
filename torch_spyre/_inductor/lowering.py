@@ -2007,6 +2007,18 @@ def _div_operand_dtype(x, y):
                    returns a float per PyTorch semantics.
 
     Returns (None, None) when neither operand is a tensor (pure Python scalars).
+
+    Promotion table (cast-back applies to floor/trunc only, not true-div):
+
+      Operand pair    | val_dtype | result_dtype | cast-back?
+      ----------------+-----------+--------------+-------------------------
+      fp32 / fp32     | fp32      | fp32         | no
+      fp16 / fp16     | fp16      | fp16         | no
+      fp16 / fp32     | fp32      | fp32         | no
+      int32 / int32   | fp32      | int32        | yes (floor only)
+      int64 / int64   | fp32      | int64        | yes (floor only)
+      int32 / fp32    | fp32      | fp32         | no
+      int32 / fp16    | fp16      | fp16         | no (fp16 dominates)
     """
     tensor_dtypes = [v.get_dtype() for v in (x, y) if hasattr(v, "get_dtype")]
     if not tensor_dtypes:
