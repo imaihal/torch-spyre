@@ -1862,10 +1862,10 @@ def _promoted_dtype(*dtypes, kind):
     )[1]
 
 
-def _cast_to_dtype(v, dtype):
-    """Cast v to dtype for use in a pointwise lowering.
+def _convert_to_dtype(v, dtype):
+    """Convert v to dtype for use in a pointwise lowering.
 
-    - Tensor operands: cast via to_dtype if not already at dtype, else return as-is.
+    - Tensor operands: convert via to_dtype if not already at dtype, else return as-is.
     - Python int scalars: coerce to float() when dtype is floating-point.
     - Everything else (Python float, already-correct tensor, etc.): return unchanged.
     """
@@ -2068,8 +2068,8 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
     val_dtype, result_dtype = _div_operand_dtypes(x, y)
 
     if val_dtype is not None:
-        x = _cast_to_dtype(x, val_dtype)
-        y = _cast_to_dtype(y, val_dtype)
+        x = _convert_to_dtype(x, val_dtype)
+        y = _convert_to_dtype(y, val_dtype)
 
     if rounding_mode == "floor":
         # All operands are now at val_dtype (fp32 for integer inputs).
@@ -2087,12 +2087,12 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         aten_lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
         prod = _realize_step(lowering.mul(qf, y))
         rem = _realize_step(lowering.sub(x, prod))
-        over = _realize_step(aten_ge(rem, y))
-        under = _realize_step(aten_lt(rem, 0.0))
-        qf_p1 = _realize_step(lowering.add(qf, 1.0))
-        qf_m1 = _realize_step(lowering.sub(qf, 1.0))
-        qf = _realize_step(lowering.where(over, qf_p1, qf))
-        qf = _realize_step(lowering.where(under, qf_m1, qf))
+        over_est = _realize_step(aten_ge(rem, y))
+        under_est = _realize_step(aten_lt(rem, 0.0))
+        qf_plus1 = _realize_step(lowering.add(qf, 1.0))
+        qf_minus1 = _realize_step(lowering.sub(qf, 1.0))
+        qf = _realize_step(lowering.where(over_est, qf_plus1, qf))
+        qf = _realize_step(lowering.where(under_est, qf_minus1, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
         if result_dtype is not None and result_dtype != val_dtype:
             return to_dtype(qf, result_dtype)
@@ -2309,7 +2309,7 @@ def _lower_cmp_impl(x, y, pointwise_fn):
     operand_dtype = _cmp_operand_dtype(tensors)
 
     return pointwise_fn(
-        _cast_to_dtype(x, operand_dtype), _cast_to_dtype(y, operand_dtype)
+        _convert_to_dtype(x, operand_dtype), _convert_to_dtype(y, operand_dtype)
     )
 
 
