@@ -2012,9 +2012,9 @@ def _realized(t):
 
 
 def _div_operand_dtypes(x, y):
-    """Return (val_dtype, result_dtype) for a division of x and y.
+    """Return (comp_dtype, result_dtype) for a division of x and y.
 
-    val_dtype    — INT_TO_FLOAT promoted dtype; the dtype to run the hardware op
+    comp_dtype   — INT_TO_FLOAT promoted dtype; the dtype to run the hardware op
                    in.  Integers promote to fp32; floats are unchanged.
     result_dtype — NO_OPMATH promoted dtype; the natural output dtype for
                    rounding_mode="floor"/"trunc" (e.g. int32/int32 → int32,
@@ -2025,7 +2025,7 @@ def _div_operand_dtypes(x, y):
 
     Promotion table (cast-back applies to floor/trunc only, not true-div):
 
-      Operand pair    | val_dtype | result_dtype | cast-back?
+      Operand pair    | comp_dtype| result_dtype | cast-back?
       ----------------+-----------+--------------+-------------------------
       fp32 / fp32     | fp32      | fp32         | no
       fp16 / fp16     | fp16      | fp16         | no
@@ -2034,11 +2034,16 @@ def _div_operand_dtypes(x, y):
       int64 / int64   | fp32      | int64        | yes (floor only)
       int32 / fp32    | fp32      | fp32         | no
       int32 / fp16    | fp16      | fp16         | no (fp16 dominates)
+      bool / bool     | fp32      | bool         | yes (floor only)
+      bool / fp16     | fp16      | fp16         | no (fp16 dominates)
+      bool / fp32     | fp32      | fp32         | no (fp32 dominates)
+      bool / int32    | fp32      | int32        | yes (floor only)
+      bool / int64    | fp32      | int64        | yes (floor only)
     """
     tensor_dtypes = [v.get_dtype() for v in (x, y) if hasattr(v, "get_dtype")]
     if not tensor_dtypes:
         return None, None
-    val_dtype = _promoted_dtype(
+    comp_dtype = _promoted_dtype(
         *tensor_dtypes,
         kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
     )
@@ -2046,33 +2051,33 @@ def _div_operand_dtypes(x, y):
         *tensor_dtypes,
         kind=ELEMENTWISE_TYPE_PROMOTION_KIND.NO_OPMATH,
     )
-    return val_dtype, result_dtype
+    return comp_dtype, result_dtype
 
 
 def _lower_div_impl(x, y, *, rounding_mode=None):
     """Shared implementation for lower_div and lower_floor_divide.
 
     Operand type promotion follows the same two-dtype pattern as lower_where:
-    - val_dtype    (INT_TO_FLOAT): dtype to cast inputs to before the hardware op.
+    - comp_dtype   (INT_TO_FLOAT): dtype to cast inputs to before the hardware op.
                    Integers promote to fp32; floats stay at their native width.
     - result_dtype (NO_OPMATH):   natural output dtype, used only for
                    rounding_mode="floor"/"trunc" where int inputs return int.
 
     Result dtype per mode:
-    - rounding_mode=None  : always val_dtype (float), even for integer inputs —
+    - rounding_mode=None  : always comp_dtype (float), even for integer inputs —
                             consistent with PyTorch true-division semantics.
-    - rounding_mode="floor": val_dtype for the correction arithmetic; cast back
+    - rounding_mode="floor": comp_dtype for the correction arithmetic; cast back
                              to result_dtype at the end (int inputs → int out).
     - rounding_mode="trunc": not yet implemented (raises Unsupported).
     """
-    val_dtype, result_dtype = _div_operand_dtypes(x, y)
+    comp_dtype, result_dtype = _div_operand_dtypes(x, y)
 
-    if val_dtype is not None:
-        x = _convert_to_dtype(x, val_dtype)
-        y = _convert_to_dtype(y, val_dtype)
+    if comp_dtype is not None:
+        x = _convert_to_dtype(x, comp_dtype)
+        y = _convert_to_dtype(y, comp_dtype)
 
     if rounding_mode == "floor":
-        # All operands are now at val_dtype (fp32 for integer inputs).
+        # All operands are now at comp_dtype (fp32 for integer inputs).
         # Each _realized call is a fusion barrier: it prevents the step from
         # being inlined into the next op, keeping every buffer as a single-op
         # ComputedBuffer that split_multi_ops can skip (Spyre requires one op per
@@ -2094,7 +2099,7 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         qf = _realized(lowering.where(over_est, qf_plus1, qf))
         qf = _realized(lowering.where(under_est, qf_minus1, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
-        if result_dtype is not None and result_dtype != val_dtype:
+        if result_dtype is not None and result_dtype != comp_dtype:
             return to_dtype(qf, result_dtype)
         return qf
 
@@ -2103,9 +2108,9 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         raise Unsupported("div with rounding_mode='trunc' is not yet implemented")
 
     else:
-        # rounding_mode=None (true division): result is always val_dtype (float),
+        # rounding_mode=None (true division): result is always comp_dtype (float),
         # even for integer inputs — consistent with PyTorch semantics.
-        # Inputs are already at val_dtype; call lowering.div directly.
+        # Inputs are already at comp_dtype; call lowering.div directly.
         return lowering.div(x, y)
 
 
