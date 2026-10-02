@@ -60,6 +60,7 @@ from .logging_utils import get_inductor_logger
 
 from torch._prims_common import (
     ELEMENTWISE_TYPE_PROMOTION_KIND,
+    Number,
     elementwise_dtypes,
 )
 
@@ -1854,10 +1855,25 @@ def with_int64_fallback(fn, *args, convert_output=True):
     return output
 
 
-def _promoted_dtype(*dtypes, kind):
-    """Return the result dtype for elementwise promotion of *dtypes under kind."""
+def _promoted_dtype(*args, kind):
+    """Return the result dtype for elementwise promotion of *args under kind.
+
+    Arguments in *args can be:
+    - Tensor IR nodes (objects with get_dtype())
+    - torch.dtype objects
+    - Python numbers (int, float, bool, complex, etc.) or sympy expressions
+    """
+
+    def _to_elementwise_arg(v):
+        if hasattr(v, "get_dtype"):
+            ndim = len(v.get_size()) if hasattr(v, "get_size") else 1
+            return torch.zeros([1] * ndim, dtype=v.get_dtype())
+        if isinstance(v, torch.dtype):
+            return torch.empty(0, dtype=v)
+        return v
+
     return elementwise_dtypes(
-        *(torch.empty(0, dtype=d) for d in dtypes),
+        *(_to_elementwise_arg(v) for v in args if v is not None),
         type_promotion_kind=kind,
     )[1]
 
@@ -2040,15 +2056,16 @@ def _div_operand_dtypes(x, y):
       bool / int32    | fp32      | int32        | yes (floor only)
       bool / int64    | fp32      | int64        | yes (floor only)
     """
-    tensor_dtypes = [v.get_dtype() for v in (x, y) if hasattr(v, "get_dtype")]
-    if not tensor_dtypes:
+    if not any(hasattr(v, "get_dtype") for v in (x, y)):
         return None, None
     comp_dtype = _promoted_dtype(
-        *tensor_dtypes,
+        x,
+        y,
         kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
     )
     result_dtype = _promoted_dtype(
-        *tensor_dtypes,
+        x,
+        y,
         kind=ELEMENTWISE_TYPE_PROMOTION_KIND.NO_OPMATH,
     )
     return comp_dtype, result_dtype
