@@ -60,7 +60,6 @@ from .logging_utils import get_inductor_logger
 
 from torch._prims_common import (
     ELEMENTWISE_TYPE_PROMOTION_KIND,
-    Number,
     elementwise_dtypes,
 )
 
