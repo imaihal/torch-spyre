@@ -2011,7 +2011,7 @@ def _realize_step(t):
     return t
 
 
-def _div_operand_dtype(x, y):
+def _div_operand_dtypes(x, y):
     """Return (val_dtype, result_dtype) for a division of x and y.
 
     val_dtype    — INT_TO_FLOAT promoted dtype; the dtype to run the hardware op
@@ -2065,7 +2065,7 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
                              to result_dtype at the end (int inputs → int out).
     - rounding_mode="trunc": not yet implemented (raises Unsupported).
     """
-    val_dtype, result_dtype = _div_operand_dtype(x, y)
+    val_dtype, result_dtype = _div_operand_dtypes(x, y)
 
     if val_dtype is not None:
         x = _cast_to_dtype(x, val_dtype)
@@ -2092,38 +2092,15 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         qf_p1 = _realize_step(lowering.add(qf, 1.0))
         qf_m1 = _realize_step(lowering.sub(qf, 1.0))
         qf = _realize_step(lowering.where(over, qf_p1, qf))
-        qf = lowering.where(under, qf_m1, qf)  # no realize needed (return value)
+        qf = _realize_step(lowering.where(under, qf_m1, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
         if result_dtype is not None and result_dtype != val_dtype:
-            qf.realize()
             return to_dtype(qf, result_dtype)
         return qf
 
     elif rounding_mode == "trunc":
+        # TODO(PR#3610): implement trunc-mode floor-division
         raise Unsupported("div with rounding_mode='trunc' is not yet implemented")
-        # TODO: Enable with PR#3610.
-        # xf = _to_float(x)
-        # yf = _to_float(y)
-        # qf = _realize_step(lowering.div(xf, yf))
-        # qf = _realize_step(lowering.trunc(qf))
-        # # Quotient correction: correct trunc-division satisfies -yf < r < yf.
-        # # Assuming at most +/-1 quotient error from the divider:
-        # #   r >= yf   => qf underestimated by 1
-        # #   r <= -yf  => qf overestimated by 1
-        # aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
-        # aten_le = lowering.lowerings[torch.ops.aten.le.Tensor]
-        # prod   = _realize_step(lowering.mul(qf, yf))
-        # rem    = _realize_step(lowering.sub(xf, prod))
-        # neg_yf = _realize_step(lowering.neg(yf))
-        # over   = _realize_step(aten_ge(rem, yf))
-        # under  = _realize_step(aten_le(rem, neg_yf))
-        # qf_p1  = _realize_step(lowering.add(qf, 1.0))
-        # qf_m1  = _realize_step(lowering.sub(qf, 1.0))
-        # qf     = _realize_step(lowering.where(over, qf_p1, qf))
-        # qf     = lowering.where(under, qf_m1, qf)  # return value — no realize needed
-        # if both_int64:
-        #     return to_dtype(qf, torch.int64)
-        # return qf
 
     else:
         # rounding_mode=None (true division): result is always val_dtype (float),

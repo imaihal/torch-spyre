@@ -6905,29 +6905,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 # The Spyre lowering raises Unsupported for trunc on float types.
                 "trunc_fp16_rand_2d": (
                     "trunc",
-                    cached_randn(
-                        (67, 256), dtype=torch.float16, scale=50.0, differentiation=4
-                    ),
-                    cached_randn(
-                        (67, 256),
-                        dtype=torch.float16,
-                        abs=True,
-                        scale=10.0,
-                        differentiation=5,
-                    ),
+                    cached_randn((67, 256), dtype=torch.float16, scale=50.0),
+                    cached_randn((67, 256), dtype=torch.float16, abs=True, scale=10.0),
                 ),
                 "trunc_fp32_rand_2d": (
                     "trunc",
-                    cached_randn(
-                        (67, 256), dtype=torch.float32, scale=50.0, differentiation=4
-                    ),
-                    cached_randn(
-                        (67, 256),
-                        dtype=torch.float32,
-                        abs=True,
-                        scale=10.0,
-                        differentiation=5,
-                    ),
+                    cached_randn((67, 256), dtype=torch.float32, scale=50.0),
+                    cached_randn((67, 256), dtype=torch.float32, abs=True, scale=10.0),
                 ),
             },
             "expect_fail": [
