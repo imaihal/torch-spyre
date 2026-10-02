@@ -6920,6 +6920,135 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "trunc_fp32_rand_2d",
             ],
         },
+        # -----------------------------------------------------------------------
+        # Mixed-dtype division (true division and floor division):
+        # tests type promotion across operand dtype combinations.
+        # -----------------------------------------------------------------------
+        ("test_div_mixed_dtype", "test_div_mixed_dtype_cpu"): {
+            "ops_dict": {
+                "true_div": lambda a, b: torch.div(a, b),
+                "floor_div": lambda a, b: torch.div(a, b, rounding_mode="floor"),
+            },
+            "expect_fail": [
+                "fp16_fp32_1d256",
+                "fp32_fp16_1d256",
+                "fp16_fp32_2d4x64",
+                "fp32_fp16_2d4x64",
+            ],
+            "param_sets": {
+                # fp16 -> fp32 is stick-reordering: blocked by mixed EA
+                "fp16_fp32_1d256": (
+                    cached_randn((256,), abs=True, scale=10.0, dtype=torch.float16),
+                    cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32),
+                ),
+                "fp32_fp16_1d256": (
+                    cached_randn((256,), abs=True, scale=10.0, dtype=torch.float32),
+                    cached_randn((256,), abs=True, scale=9.9, dtype=torch.float16),
+                ),
+                "fp16_fp32_2d4x64": (
+                    cached_randn((4, 64), abs=True, scale=10.0, dtype=torch.float16),
+                    cached_randn((4, 64), abs=True, scale=9.9, dtype=torch.float32),
+                ),
+                "fp32_fp16_2d4x64": (
+                    cached_randn((4, 64), abs=True, scale=10.0, dtype=torch.float32),
+                    cached_randn((4, 64), abs=True, scale=9.9, dtype=torch.float16),
+                ),
+                # int32 -> fp16 is unsupported on device: cast runs on the HOST
+                # (eager_fallback), the division then runs on device in fp16
+                "int32_fp16_1d256": (
+                    torch.randint(0, 100, (256,), dtype=torch.int32),
+                    cached_randn((256,), abs=True, scale=10.0, dtype=torch.float16),
+                ),
+                "fp16_int32_1d256": (
+                    cached_randn((256,), abs=True, scale=10.0, dtype=torch.float16),
+                    torch.randint(1, 100, (256,), dtype=torch.int32),
+                ),
+                "int32_fp16_2d4x64": (
+                    torch.randint(0, 100, (4, 64), dtype=torch.int32),
+                    cached_randn((4, 64), abs=True, scale=50.0, dtype=torch.float16),
+                ),
+                # int32 -> fp32: 4B->4B, EA unchanged, genuinely on device
+                "int32_fp32_1d256": (
+                    torch.randint(0, 100, (256,), dtype=torch.int32),
+                    cached_randn((256,), abs=True, scale=50.0, dtype=torch.float32),
+                ),
+                "int32_fp32_2d4x64": (
+                    torch.randint(0, 100, (4, 64), dtype=torch.int32),
+                    cached_randn((4, 64), abs=True, scale=50.0, dtype=torch.float32),
+                ),
+                # int64 x float16 -> float16: int64->fp16 absent from DtypeOpTable,
+                # cast runs on HOST (eager_fallback), division on device in fp16
+                "int64_fp16_1d256": (
+                    torch.randint(0, 100, (256,), dtype=torch.int64),
+                    cached_randn((256,), abs=True, scale=50.0, dtype=torch.float16),
+                ),
+                "fp16_int64_1d256": (
+                    cached_randn((256,), abs=True, scale=50.0, dtype=torch.float16),
+                    torch.randint(1, 100, (256,), dtype=torch.int64),
+                ),
+                # int64 x float32 -> float32: int64->fp32 falls back to CPU,
+                # division on device in fp32
+                "int64_fp32_1d256": (
+                    torch.randint(0, 100, (256,), dtype=torch.int64),
+                    cached_randn((256,), abs=True, scale=50.0, dtype=torch.float32),
+                ),
+                "fp32_int64_1d256": (
+                    cached_randn((256,), abs=True, scale=50.0, dtype=torch.float32),
+                    torch.randint(1, 100, (256,), dtype=torch.int64),
+                ),
+                # int64 x int32 -> float32: both cast to fp32
+                "int64_int32_1d256": (
+                    torch.randint(0, 100, (256,), dtype=torch.int64),
+                    torch.randint(1, 100, (256,), dtype=torch.int32),
+                ),
+                "int32_int64_1d256": (
+                    torch.randint(0, 100, (256,), dtype=torch.int32),
+                    torch.randint(1, 100, (256,), dtype=torch.int64),
+                ),
+            },
+        },
+        # -----------------------------------------------------------------------
+        # Scalar division across tensor dtypes and Python scalar types:
+        # tests tensor-scalar type promotion for div and floor_div.
+        # -----------------------------------------------------------------------
+        ("test_div_scalar_dtypes", "test_div_scalar_dtypes_cpu"): {
+            "ops_dict": {
+                "true_div": lambda a, b: torch.div(a, b),
+                "floor_div": lambda a, b: torch.div(a, b, rounding_mode="floor"),
+            },
+            "param_sets": {
+                # bool tensor vs int/float scalars
+                "bool_int_scalar": (torch.tensor([True, False] * 128), 1),
+                "bool_float_scalar": (torch.tensor([True, False] * 128), 0.5),
+                # float tensor vs int scalar
+                "fp16_int_scalar": (
+                    cached_randn((256,), abs=True, scale=10.0, dtype=torch.float16),
+                    8,
+                ),
+                "fp32_int_scalar": (
+                    cached_randn((256,), abs=True, scale=10.0, dtype=torch.float32),
+                    8,
+                ),
+                # int tensor vs float scalar: promotes to fp32
+                "int32_float_scalar": (
+                    torch.randint(0, 100, (256,), dtype=torch.int32),
+                    2.5,
+                ),
+                "int64_float_scalar": (
+                    torch.randint(0, 100, (256,), dtype=torch.int64),
+                    2.5,
+                ),
+                # int tensor vs int scalar
+                "int32_int_scalar": (
+                    torch.randint(0, 100, (256,), dtype=torch.int32),
+                    2,
+                ),
+                "int64_int_scalar": (
+                    torch.randint(0, 100, (256,), dtype=torch.int64),
+                    2,
+                ),
+            },
+        },
     }
 
     def __init__(self, *args, **kwargs):
@@ -10223,6 +10352,22 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             _replace_near_zero(y)
 
         self.compare_with_cpu(fn, x, y)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
+    def test_div_mixed_dtype_cpu(self, op, x, y):
+        """Test torch.div type promotion across mixed tensor dtypes."""
+        if isinstance(y, torch.Tensor):
+            _replace_near_zero(y)
+        self.compare_with_cpu(op, x, y)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
+    def test_div_scalar_dtypes_cpu(self, op, x, scalar):
+        """Test torch.div type promotion with Python scalar operands."""
+        if isinstance(scalar, (int, float)) and abs(scalar) < FP16_EPS:
+            scalar = 1.0
+        self.compare_with_cpu(op, x, scalar)
 
 
 _TEST_LARGE_MATMUL_FP32_PROXY_SHAPES = _derive_test_large_matmul_fp32_proxy_shapes(
