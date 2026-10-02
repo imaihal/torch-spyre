@@ -2005,8 +2005,8 @@ def lower_sub(x, y, *, alpha=1):
     return with_int64_fallback(lowering.sub, x, y)
 
 
-def _realize_step(t):
-    """Realize t as a fusion barrier and return t, for use in multi-step lowerings."""
+def _realized(t):
+    """Return t after realizing it as a fusion barrier in multi-step lowerings."""
     t.realize()
     return t
 
@@ -2073,26 +2073,26 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
 
     if rounding_mode == "floor":
         # All operands are now at val_dtype (fp32 for integer inputs).
-        # Each _realize_step call is a fusion barrier: it prevents the step from
+        # Each _realized call is a fusion barrier: it prevents the step from
         # being inlined into the next op, keeping every buffer as a single-op
         # ComputedBuffer that split_multi_ops can skip (Spyre requires one op per
         # SDSC).
-        qf = _realize_step(lowering.div(x, y))
-        qf = _realize_step(lowering.floor(qf))
+        qf = _realized(lowering.div(x, y))
+        qf = _realized(lowering.floor(qf))
         # Quotient correction: correct floor-division satisfies 0 <= r < y.
         # Assuming at most +/-1 quotient error from the divider:
         #   r >= y  => qf underestimated by 1
         #   r <  0  => qf overestimated by 1
         aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
         aten_lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
-        prod = _realize_step(lowering.mul(qf, y))
-        rem = _realize_step(lowering.sub(x, prod))
-        over_est = _realize_step(aten_ge(rem, y))
-        under_est = _realize_step(aten_lt(rem, 0.0))
-        qf_plus1 = _realize_step(lowering.add(qf, 1.0))
-        qf_minus1 = _realize_step(lowering.sub(qf, 1.0))
-        qf = _realize_step(lowering.where(over_est, qf_plus1, qf))
-        qf = _realize_step(lowering.where(under_est, qf_minus1, qf))
+        prod = _realized(lowering.mul(qf, y))
+        rem = _realized(lowering.sub(x, prod))
+        over_est = _realized(aten_ge(rem, y))
+        under_est = _realized(aten_lt(rem, 0.0))
+        qf_plus1 = _realized(lowering.add(qf, 1.0))
+        qf_minus1 = _realized(lowering.sub(qf, 1.0))
+        qf = _realized(lowering.where(over_est, qf_plus1, qf))
+        qf = _realized(lowering.where(under_est, qf_minus1, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
         if result_dtype is not None and result_dtype != val_dtype:
             return to_dtype(qf, result_dtype)
