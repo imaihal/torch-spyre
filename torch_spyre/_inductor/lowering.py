@@ -2094,21 +2094,21 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
 
     if rounding_mode == "floor":
         # All operands are now at comp_dtype (fp32 for integer inputs).
-        # Each _realized call is a fusion barrier: it prevents the step from
-        # being inlined into the next op, keeping every buffer as a single-op
-        # ComputedBuffer that split_multi_ops can skip (Spyre requires one op per
-        # SDSC).
+        # Each _realized call is a fusion barrier (Spyre requires one op per SDSC).
         qf = _realized(lowering.div(x, y))
         qf = _realized(lowering.floor(qf))
         # Quotient correction. Correct floor-division satisfies
-        #   0 <= rem*sign(y) < |y|
-        # which holds for EITHER sign of y (rem takes the sign of y and
-        # |rem| < |y|).  Folding the sign of y into rem keeps both comparisons
-        # exact -- crucially we must NOT divide again here, because the Spyre
-        # divider is the very thing being corrected: rem/y comes back just
-        # under 1.0 whenever y divides x exactly, which silently drops the +1.
-        #   rem*sign(y) >= |y|  => qf underestimated by 1
-        #   rem*sign(y) <  0    => qf overestimated by 1
+        #   0 <= rem*sign(y) < |y|,   where rem = x - qf*y        … (*)
+        # which holds for EITHER sign of y.  rem is computed via multiply-
+        # subtract (exact); re-dividing rem/y would reintroduce the same
+        # rounding error being corrected.
+        #
+        # Normalising by sign(y) gives rem_s = rem*sign(y), abs_y = |y|,
+        # turning (*) into the sign-independent test  0 <= rem_s < abs_y:
+        #   rem_s >= abs_y  => qf underestimated by 1  (add 1)
+        #   rem_s <  0      => qf overestimated  by 1  (subtract 1)
+        # The two conditions are mutually exclusive (rem_s < 0 and rem_s >= abs_y
+        # cannot both hold), so at most one correction is applied per element.
         aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
         aten_lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
         prod = _realized(lowering.mul(qf, y))
