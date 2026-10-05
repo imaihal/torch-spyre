@@ -2095,6 +2095,9 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
     if rounding_mode == "floor":
         # All operands are now at comp_dtype (fp32 for integer inputs).
         # Each _realized call is a fusion barrier (Spyre requires one op per SDSC).
+        # lowering.<fn> (Inductor built-ins) are used throughout rather than the
+        # Spyre lower_* wrappers: all operands are already at comp_dtype, so the
+        # wrappers' condition-cast and INT_TO_FLOAT promotion would both be no-ops.
         qf = _realized(lowering.div(x, y))
         qf = _realized(lowering.floor(qf))
         # Quotient correction. Correct floor-division satisfies
