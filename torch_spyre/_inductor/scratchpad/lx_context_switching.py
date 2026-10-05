@@ -51,7 +51,7 @@ from torch_spyre._inductor.pass_utils import (
 from torch_spyre._inductor.scratchpad.allocator import ScratchpadOptimizationPass
 from torch_spyre._inductor.scratchpad.graph_editor import GraphEditor
 from torch_spyre._inductor.scratchpad.utils import calculate_liveness
-from torch_spyre._inductor.pass_utils import origin_in_graph
+from torch_spyre._inductor.split_multi_ops import _origin_in_graph
 from torch_spyre.ops.fallbacks import fallback_ops
 
 logger = get_inductor_logger("lx_context_switching")
@@ -202,7 +202,7 @@ def _dump_buffers(
         assert isinstance(buf, ComputedBuffer), (
             f"unexpected at-risk buffer type {type(buf)} ({buf})"
         )
-        buf_fx = getattr(buf, "origin_node", None) or origin_in_graph(
+        buf_fx = getattr(buf, "origin_node", None) or _origin_in_graph(
             buf.origins, editor.fx_graph
         )
         if buf_fx is None:
@@ -398,9 +398,9 @@ class LxContextSwitchingPass(ScratchpadOptimizationPass):
 
         editor = GraphEditor(graph)
         for target_op, at_risk_bufs in targets:
-            target_fx_node = getattr(target_op, "origin_node", None) or origin_in_graph(
-                target_op.origins, editor.fx_graph
-            )
+            target_fx_node = getattr(
+                target_op, "origin_node", None
+            ) or _origin_in_graph(target_op.origins, editor.fx_graph)
             if target_fx_node is None:
                 continue
             dumped = _dump_buffers(
