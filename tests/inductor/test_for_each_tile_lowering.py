@@ -3304,7 +3304,6 @@ class TestConsumeTileDimMarkers(unittest.TestCase):
             nested_split_m_then_k_fn,
         )
         from torch._inductor import ir
-        from torch._inductor.exc import InductorError
 
         X = torch.randn(256, 256, device=DEVICE_NAME, dtype=torch.float16)
         Y = torch.randn(256, 64, device=DEVICE_NAME, dtype=torch.float16)
@@ -3328,14 +3327,7 @@ class TestConsumeTileDimMarkers(unittest.TestCase):
 
         passes_mod.splice_while_loops = capturing_splice_while_loops
         try:
-            try:
-                capture_post_grad_while_loop(nested_split_m_then_k_fn, (X, Y))
-            except InductorError:
-                # Per this test's docstring: splice_while_loops is the first pass,
-                # and this test checks the captured snapshot of graph.operations
-                # right after splice_while_loops returns. Errors in subsequent,
-                # unrelated passes (e.g. layout propagation / scratchpad) are tolerated.
-                pass
+            capture_post_grad_while_loop(nested_split_m_then_k_fn, (X, Y))
         finally:
             passes_mod.splice_while_loops = original_splice_while_loops
 
