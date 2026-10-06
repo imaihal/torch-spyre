@@ -1112,15 +1112,15 @@ def _get_tensor_layout_labels(use_op_dims: bool, op_name: str) -> list[str]:
     return MATMUL_LAYOUT_LABELS
 
 
-def _get_data_format(op, device_dtype):
+def _get_data_format(op, device_dtype, all_int32: bool = False):
     """Return the SDSC descriptor format for a tensor.
 
     This is metadata relabeling only; the underlying 32-bit data is unchanged.
-    Native integer add/mul use SENUINT32 tensor descriptors in the SDSC DDL,
-    while identity retains its existing fp32 compatibility relabeling.
+    Native integer add/mul use SENUINT32 tensor descriptors in the SDSC DDL
+    only when all operands are IEEE_INT32. Identity retains its fp32 relabeling.
     """
     if device_dtype == DataFormats.IEEE_INT32:
-        if op in ("add", "mul"):
+        if op in ("add", "mul") and all_int32:
             return DataFormats.SENUINT32
         if op == IDENTITY_OP:
             # In the long term, SDSC should accept int32 as the data format.
@@ -1231,6 +1231,9 @@ def _create_sdsc_tensors(
     missing_dim = None
     sdsc_args: list[SDSCArgs] = []
     matmul_n_dim = injected_dims.get("matmul_n_dim")
+    all_int32 = bool(op_spec.args) and all(
+        a.device_dtype == DataFormats.IEEE_INT32 for a in op_spec.args
+    )
 
     for i, arg in enumerate(op_spec.args):
         # Step 1: Determine dimension order and stick dimension.
@@ -1605,7 +1608,7 @@ def _create_sdsc_tensors(
         arg_data_format = (
             DataFormats.SENUINT32
             if (has_indirect_access and i in index_tensor_indices)
-            else _get_data_format(op_spec.op, arg.device_dtype)
+            else _get_data_format(op_spec.op, arg.device_dtype, all_int32=all_int32)
         )
 
         # allocation keys are mutually exclusive (see TensorArg.allocation
@@ -1652,15 +1655,16 @@ def _get_op_func(
     is_reduction: bool,
     output_scales: dict,
     data_format: DataFormats | None = None,
+    all_int32: bool = False,
 ) -> str:
     """Return the SDSC opfunc string for an operation.
 
-    For IEEE_INT32 tensors, dispatches ``add`` -> ``addi32toi32`` and
-    ``mul`` -> ``muli32toi32`` (the device's native 32-bit integer intrinsics).
+    For IEEE_INT32 tensors where all operands are integer, dispatches
+    ``add`` -> ``addi32toi32`` and ``mul`` -> ``muli32toi32``.
     Non-stick reductions append the ``nonstick`` suffix.  All other ops map to
     their op name unchanged.
     """
-    if data_format == DataFormats.IEEE_INT32:
+    if data_format == DataFormats.IEEE_INT32 and all_int32:
         if op == "add":
             return "addi32toi32"
         if op == "mul":
@@ -2504,16 +2508,20 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
     # original value-tensor format rather than the relabeled SDSC format.
     value_arg_index = 1 if indirect_access_indices else 0
     source_data_format = op_spec.args[value_arg_index].device_dtype
+    all_int32 = bool(op_spec.args) and all(
+        a.device_dtype == DataFormats.IEEE_INT32 for a in op_spec.args
+    )
     opfunc = (
         "shuffle"
         if is_relayout
         else _get_op_func(
-            # IEEE_INT32 selects addi32toi32 or muli32toi32; other formats
-            # retain the existing operation mapping.
+            # Require all operands to be IEEE_INT32 before selecting native
+            # addi32toi32 or muli32toi32.
             op_spec.op,
             op_spec.is_reduction,
             args[-1].scales,
             source_data_format,
+            all_int32=all_int32,
         )
     )
 
