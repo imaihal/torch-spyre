@@ -6942,6 +6942,27 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         result = torch.compile(torch.eq, dynamic=False)(x_spyre, y_spyre).cpu()
         torch.testing.assert_close(result, torch.eq(x, y))
 
+    def test_bool_logical_or(self):
+        dtype = torch.bool
+        x = torch.randint(0, 2, (2, 64), dtype=dtype)
+        x_spyre = x.to("spyre")
+        y = torch.randint(0, 2, (2, 64), dtype=dtype)
+        y_spyre = y.to("spyre")
+        result = torch.compile(torch.logical_or, dynamic=False)(x_spyre, y_spyre).cpu()
+        torch.testing.assert_close(result, torch.logical_or(x, y))
+
+    def test_bool_add(self):
+        # torch.add(bool, bool) is routed to logical_or by upstream Inductor
+        # (override_fn_when_input_bool="logical_or" on aten.add), so this
+        # exercises the lower_logical_or path indirectly.
+        dtype = torch.bool
+        x = torch.randint(0, 2, (2, 64), dtype=dtype)
+        x_spyre = x.to("spyre")
+        y = torch.randint(0, 2, (2, 64), dtype=dtype)
+        y_spyre = y.to("spyre")
+        result = torch.compile(torch.add, dynamic=False)(x_spyre, y_spyre).cpu()
+        torch.testing.assert_close(result, torch.add(x, y))
+
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_scalar_cpu(self, op, *args):
         def fn(*tensor_args):

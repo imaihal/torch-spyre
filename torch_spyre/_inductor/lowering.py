@@ -2387,6 +2387,10 @@ def lower_prod_dim(x, dim, keepdim=False):
     return with_int64_fallback(_prod_dim_impl, x)
 
 
+# convert_input_to_bool=True guarantees operands are cast to 0/1 before the
+# backend sees them.  On 0/1 values maximum(a, b) == a OR b, so the hardware
+# maximum op correctly implements logical OR.  This mirrors logical_and, which
+# uses mul (product of 0/1 values) for the same reason.
 @register_spyre_lowering(
     torch.ops.aten.logical_or.default,
     type_promotion_kind=None,
