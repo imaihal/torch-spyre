@@ -1944,6 +1944,8 @@ def lower_where(condition, self, other):
 # before layout propagation, resulting in an IR node with STANDARD EA.
 # In contrast, with None, the FP16 operand survives into the fused body,
 # allowing propagate_layouts to assign the correct DL16_TO_FP32 EA.
+# lowering.add applies default promotion; when the result stays int32/int64,
+# SDSC selects addi32toi32.
 @register_spyre_lowering(
     torch.ops.aten.add.Tensor,
     type_promotion_kind=None,
@@ -1960,8 +1962,6 @@ def lower_add(x, y, *, alpha=1):
         alpha_tensor.realize()
         y = lowering.mul(y, alpha_tensor)
         y.realize()
-    # SDSC selects addi32toi32 for native integer operands; default type
-    # promotion converts non-native operands to float before entry.
     return lowering.add(x, y)
 
 
@@ -1970,14 +1970,14 @@ def lower_add(x, y, *, alpha=1):
 # before layout propagation, resulting in an IR node with STANDARD EA.
 # In contrast, with None, the FP16 operand survives into the fused body,
 # allowing propagate_layouts to assign the correct DL16_TO_FP32 EA.
+# lowering.mul applies default promotion; when the result stays int32/int64,
+# SDSC selects muli32toi32.
 @register_spyre_lowering(
     torch.ops.aten.mul.Tensor,
     type_promotion_kind=None,
     broadcast=True,
 )
 def lower_mul(x, y):
-    # SDSC selects muli32toi32 for native integer operands; default type
-    # promotion converts non-native operands to float before entry.
     return lowering.mul(x, y)
 
 
