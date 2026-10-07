@@ -24,7 +24,6 @@ from torch._inductor.virtualized import V
 from torch_spyre._C import DataFormats, ElementArrangement
 from torch_spyre._inductor import config as _spyre_config
 from torch_spyre._inductor.constants import (
-    ADDI32TOI32_OP,
     CONV2D_DIM_LABELS,
     CONV2D_FWD_OP,
     CONV2D_LAYOUT_LABELS,
@@ -39,12 +38,12 @@ from torch_spyre._inductor.constants import (
     MATMUL_DIM_LABELS,
     MATMUL_LAYOUT_LABELS,
     MATMUL_REDUCTION_OPS,
-    MULI32TOI32_OP,
     OUTPUT_DIM_LABELS,
     POOL_DIM_LABELS,
     POOL_OPS,
     QUANTSCALEPERTOKENFP8_OP,
     RESTICKIFY_OP,
+    SPYRE_INT32_OPS,
     TOPK_OPS,
     KEEP_BY_INDEX_OP,
 )
@@ -1130,7 +1129,7 @@ def _get_data_format(op, device_dtype):
     tensor descriptors in the SDSC DDL.  Identity retains its fp32 relabeling.
     """
     if device_dtype == DataFormats.IEEE_INT32:
-        if op in (ADDI32TOI32_OP, MULI32TOI32_OP):
+        if op in SPYRE_INT32_OPS:
             return DataFormats.SENUINT32
         if op == IDENTITY_OP:
             # In the long term, SDSC should accept int32 as the data format.
@@ -1148,7 +1147,7 @@ def _get_sdsc_spec_data_format(op, arg_data_format):
     the int32 tensor descriptor itself stays int32.
     See backend issue deeptools#4307.
     """
-    if op in (FP32TOINT32_OP, INT32TOFP32_OP, ADDI32TOI32_OP, MULI32TOI32_OP):
+    if op in (FP32TOINT32_OP, INT32TOFP32_OP, *SPYRE_INT32_OPS):
         return DataFormats.IEEE_FP32
     return arg_data_format
 
@@ -1661,14 +1660,11 @@ def _get_op_func(
     op: str,
     is_reduction: bool,
     output_scales: dict,
-    data_format: DataFormats | None = None,
 ) -> str:
     """Return the SDSC opfunc string for an operation.
 
-    ``OpSpec.op`` already carries the native int32 spelling (``addi32toi32`` /
-    ``muli32toi32``) when all operands are IEEE_INT32 — the rename is applied
-    once in ``SpyreKernel.create_op_spec``.  Non-stick reductions append the
-    ``nonstick`` suffix.  All other ops map to their op name unchanged.
+    Non-stick reductions append the ``nonstick`` suffix.  All other ops map to
+    their op name unchanged.
     """
     if _is_pool(op) or _is_conv(op):
         return op
@@ -2498,7 +2494,6 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
     # Indirect operations place the index tensor first; dispatch from the
     # original value-tensor format rather than the relabeled SDSC format.
     value_arg_index = 1 if indirect_access_indices else 0
-    source_data_format = op_spec.args[value_arg_index].device_dtype
     opfunc = (
         "shuffle"
         if is_relayout
@@ -2506,7 +2501,6 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
             op_spec.op,
             op_spec.is_reduction,
             args[-1].scales,
-            source_data_format,
         )
     )
 

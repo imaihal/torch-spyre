@@ -3120,8 +3120,8 @@ class KtirBuilder:
         # golden is a named ``add``.
         #
         # Integer (IEEE_INT32) add/mul arrive as ``addi32toi32`` / ``muli32toi32``
-        # — the rename is applied in ``SpyreKernel.create_op_spec`` before the
-        # OpSpec is built — so these entries handle float operands only.
+        # — chosen by ``SpyreOpFuncs.add`` / ``SpyreOpFuncs.mul`` — so these
+        # entries handle float operands only.
         "add": Recipe(
             arity=2,
             dispatch=request_scalar_when_broadcast,
@@ -3139,20 +3139,26 @@ class KtirBuilder:
             ),
         ),
         # Native int32 add/mul: OpSpec.op already carries the hardware name when
-        # all operands are IEEE_INT32 (renamed by _native_int32_op in
-        # create_op_spec).  A single PAYLOAD arm is sufficient because these ops
-        # only arrive at this format; request_scalar_when_broadcast is used for
-        # consistency with the float add/mul entries and to correctly route a
-        # broadcast int32 add/mul into a linalg.generic region.
+        # all operands are IEEE_INT32 — the name is chosen by SpyreOpFuncs.add /
+        # SpyreOpFuncs.mul.  The arm claims IEEE_INT32 explicitly so the default
+        # request_by_dtype dispatch routes both aligned and broadcast requests to
+        # the payload builder directly, without going through
+        # request_scalar_when_broadcast's NAMED-arm filter.
         "addi32toi32": Recipe(
             arity=2,
-            dispatch=request_scalar_when_broadcast,
-            arms=Arm(kind=BindingKind.PAYLOAD, binding=lambda: spyreop.addi32toi32),
+            arms=Arm(
+                kind=BindingKind.PAYLOAD,
+                binding=lambda: spyreop.addi32toi32,
+                dtypes=(DataFormats.IEEE_INT32,),
+            ),
         ),
         "muli32toi32": Recipe(
             arity=2,
-            dispatch=request_scalar_when_broadcast,
-            arms=Arm(kind=BindingKind.PAYLOAD, binding=lambda: spyreop.muli32toi32),
+            arms=Arm(
+                kind=BindingKind.PAYLOAD,
+                binding=lambda: spyreop.muli32toi32,
+                dtypes=(DataFormats.IEEE_INT32,),
+            ),
         ),
         # No integer arm: there is no ``subi32toi32`` intrinsic, so an int32
         # broadcast ``sub`` still reaches ``_broadcast_surface``'s refusal -- the
