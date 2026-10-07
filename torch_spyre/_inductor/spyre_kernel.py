@@ -39,7 +39,7 @@ from torch._inductor.virtualized import V
 
 from .constants import (
     SPYRE_FP32_OPS,
-    SPYRE_INT32_OPS,
+    NATIVE_INT32_OPS,
     CONV_OPS,
     DEPTHWISE_CONV_REDUCTION_OPS,
     IDENTITY_OP,
@@ -192,6 +192,17 @@ class SpyreOpFuncs:
         return PointwiseOp("add", [a, b])
 
     @staticmethod
+    def addi32toi32(a, b):
+        """Unreachable stub — exists so _pointwise_ops() registers this name.
+
+        The rename from ``add`` to ``addi32toi32`` is applied in
+        ``SpyreKernel.create_op_spec`` via ``_native_int32_op`` once every
+        value operand's device_dtype is known to be IEEE_INT32.  Inductor
+        never dispatches through this method directly.
+        """
+        return PointwiseOp("addi32toi32", [a, b])
+
+    @staticmethod
     def clamp(x, min, max):
         op_info = {
             "constants": {
@@ -273,6 +284,17 @@ class SpyreOpFuncs:
     @staticmethod
     def mul(a, b):
         return PointwiseOp("mul", [a, b])
+
+    @staticmethod
+    def muli32toi32(a, b):
+        """Unreachable stub — exists so _pointwise_ops() registers this name.
+
+        The rename from ``mul`` to ``muli32toi32`` is applied in
+        ``SpyreKernel.create_op_spec`` via ``_native_int32_op`` once every
+        value operand's device_dtype is known to be IEEE_INT32.  Inductor
+        never dispatches through this method directly.
+        """
+        return PointwiseOp("muli32toi32", [a, b])
 
     @staticmethod
     def ne(a, b):
@@ -905,6 +927,8 @@ class SpyreKernel(Kernel[CSEVariable]):
     ) -> OpSpec:
         from torch_spyre._inductor.constants import SPYRE_FP8_OPS
 
+        op = _native_int32_op(op, args, indirect_var_names)
+
         for arg in args:
             if _is_indirect_index_arg(arg, indirect_var_names):
                 continue
@@ -914,7 +938,8 @@ class SpyreKernel(Kernel[CSEVariable]):
                 or DtypeOpTable.is_dtype_op(op)
                 or (op in SPYRE_FP32_OPS and arg.device_dtype == DataFormats.IEEE_FP32)
                 or (
-                    op in SPYRE_INT32_OPS and arg.device_dtype == DataFormats.IEEE_INT32
+                    op in NATIVE_INT32_OPS.values()
+                    and arg.device_dtype == DataFormats.IEEE_INT32
                 )
                 or arg.device_dtype == DataFormats.SEN169_FP16
                 or (
@@ -1546,6 +1571,31 @@ def _is_indirect_index_arg(
     return arg.name is not None and bool(
         indirect_var_names and arg.name in indirect_var_names
     )
+
+
+def _native_int32_op(
+    op: str,
+    args: "Sequence[TensorArg]",
+    indirect_var_names: "frozenset[str] | None",
+) -> str:
+    """Return the native int32 hardware spelling of ``op`` when all value args are int32.
+
+    Looks up ``op`` in ``NATIVE_INT32_OPS``; if found and every non-index-tensor
+    arg carries ``device_dtype == DataFormats.IEEE_INT32``, returns the native
+    name (e.g. ``"addi32toi32"``).  Returns ``op`` unchanged otherwise, including
+    the mixed-dtype case where some but not all args are int32 — that falls through
+    to the dtype-validation loop in ``create_op_spec`` and raises ``Unsupported``.
+    """
+    native = NATIVE_INT32_OPS.get(op)
+    if native is None:
+        return op
+    if all(
+        arg.device_dtype == DataFormats.IEEE_INT32
+        for arg in args
+        if not _is_indirect_index_arg(arg, indirect_var_names)
+    ):
+        return native
+    return op
 
 
 def _iter_op_specs(specs):

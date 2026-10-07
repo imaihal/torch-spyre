@@ -24,6 +24,7 @@ from torch._inductor.virtualized import V
 from torch_spyre._C import DataFormats, ElementArrangement
 from torch_spyre._inductor import config as _spyre_config
 from torch_spyre._inductor.constants import (
+    ADDI32TOI32_OP,
     CONV2D_DIM_LABELS,
     CONV2D_FWD_OP,
     CONV2D_LAYOUT_LABELS,
@@ -38,6 +39,7 @@ from torch_spyre._inductor.constants import (
     MATMUL_DIM_LABELS,
     MATMUL_LAYOUT_LABELS,
     MATMUL_REDUCTION_OPS,
+    MULI32TOI32_OP,
     OUTPUT_DIM_LABELS,
     POOL_DIM_LABELS,
     POOL_OPS,
@@ -1120,15 +1122,15 @@ def _get_tensor_layout_labels(use_op_dims: bool, op_name: str) -> list[str]:
     return MATMUL_LAYOUT_LABELS
 
 
-def _get_data_format(op, device_dtype, all_int32: bool = False):
+def _get_data_format(op, device_dtype):
     """Return the SDSC descriptor format for a tensor.
 
     This is metadata relabeling only; the underlying 32-bit data is unchanged.
-    Native integer add/mul use SENUINT32 tensor descriptors in the SDSC DDL
-    only when all operands are IEEE_INT32. Identity retains its fp32 relabeling.
+    Native integer add/mul (``addi32toi32`` / ``muli32toi32``) use SENUINT32
+    tensor descriptors in the SDSC DDL.  Identity retains its fp32 relabeling.
     """
     if device_dtype == DataFormats.IEEE_INT32:
-        if op in ("add", "mul") and all_int32:
+        if op in (ADDI32TOI32_OP, MULI32TOI32_OP):
             return DataFormats.SENUINT32
         if op == IDENTITY_OP:
             # In the long term, SDSC should accept int32 as the data format.
@@ -1146,7 +1148,7 @@ def _get_sdsc_spec_data_format(op, arg_data_format):
     the int32 tensor descriptor itself stays int32.
     See backend issue deeptools#4307.
     """
-    if op in (FP32TOINT32_OP, INT32TOFP32_OP, "addi32toi32", "muli32toi32"):
+    if op in (FP32TOINT32_OP, INT32TOFP32_OP, ADDI32TOI32_OP, MULI32TOI32_OP):
         return DataFormats.IEEE_FP32
     return arg_data_format
 
@@ -1239,9 +1241,6 @@ def _create_sdsc_tensors(
     missing_dim = None
     sdsc_args: list[SDSCArgs] = []
     matmul_n_dim = injected_dims.get("matmul_n_dim")
-    all_int32 = bool(op_spec.args) and all(
-        a.device_dtype == DataFormats.IEEE_INT32 for a in op_spec.args
-    )
 
     for i, arg in enumerate(op_spec.args):
         # Step 1: Determine dimension order and stick dimension.
@@ -1616,7 +1615,7 @@ def _create_sdsc_tensors(
         arg_data_format = (
             DataFormats.SENUINT32
             if (has_indirect_access and i in index_tensor_indices)
-            else _get_data_format(op_spec.op, arg.device_dtype, all_int32=all_int32)
+            else _get_data_format(op_spec.op, arg.device_dtype)
         )
 
         # allocation keys are mutually exclusive (see TensorArg.allocation
@@ -1663,20 +1662,14 @@ def _get_op_func(
     is_reduction: bool,
     output_scales: dict,
     data_format: DataFormats | None = None,
-    all_int32: bool = False,
 ) -> str:
     """Return the SDSC opfunc string for an operation.
 
-    For IEEE_INT32 tensors where all operands are integer, dispatches
-    ``add`` -> ``addi32toi32`` and ``mul`` -> ``muli32toi32``.
-    Non-stick reductions append the ``nonstick`` suffix.  All other ops map to
-    their op name unchanged.
+    ``OpSpec.op`` already carries the native int32 spelling (``addi32toi32`` /
+    ``muli32toi32``) when all operands are IEEE_INT32 — the rename is applied
+    once in ``SpyreKernel.create_op_spec``.  Non-stick reductions append the
+    ``nonstick`` suffix.  All other ops map to their op name unchanged.
     """
-    if data_format == DataFormats.IEEE_INT32 and all_int32:
-        if op == "add":
-            return "addi32toi32"
-        if op == "mul":
-            return "muli32toi32"
     if _is_pool(op) or _is_conv(op):
         return op
     # quantscalepertokenfp8 maps directly to deeptools operator (no "nonstick" suffix)
@@ -2506,20 +2499,14 @@ def parse_op_spec(op_spec: OpSpec) -> tuple["SDSCSpec", "dict"]:
     # original value-tensor format rather than the relabeled SDSC format.
     value_arg_index = 1 if indirect_access_indices else 0
     source_data_format = op_spec.args[value_arg_index].device_dtype
-    all_int32 = bool(op_spec.args) and all(
-        a.device_dtype == DataFormats.IEEE_INT32 for a in op_spec.args
-    )
     opfunc = (
         "shuffle"
         if is_relayout
         else _get_op_func(
-            # Require all operands to be IEEE_INT32 before selecting native
-            # addi32toi32 or muli32toi32.
             op_spec.op,
             op_spec.is_reduction,
             args[-1].scales,
             source_data_format,
-            all_int32=all_int32,
         )
     )
 

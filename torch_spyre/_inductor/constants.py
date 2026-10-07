@@ -171,14 +171,16 @@ SPYRE_FP32_OPS = [
     "prod",
 ]
 
-# Operations the device has a 32-bit integer intrinsic for: `addi32toi32` and
-# `muli32toi32`. Separate from SPYRE_FP32_OPS because the two are different
-# templates reached by the same logical op name. SDSC and KTIR select the native
-# spelling when the operation data format is IEEE_INT32.
-SPYRE_INT32_OPS = [
-    "add",
-    "mul",
-]
+# Operations the device has a 32-bit integer intrinsic for.  Maps each logical
+# op name to the hardware template name that SpyreKernel.create_op_spec emits
+# when every value operand is IEEE_INT32.  The rename is applied once, early,
+# so every backend (SDSC, KTIR) receives a concrete op name.
+ADDI32TOI32_OP = "addi32toi32"
+MULI32TOI32_OP = "muli32toi32"
+NATIVE_INT32_OPS: dict[str, str] = {
+    "add": ADDI32TOI32_OP,
+    "mul": MULI32TOI32_OP,
+}
 
 # FP8 E4M3 numeric limits
 FP8_E4M3FN_INFO = torch.finfo(torch.float8_e4m3fn)
