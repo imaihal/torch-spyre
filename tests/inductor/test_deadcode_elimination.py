@@ -129,22 +129,47 @@ class TestDeadMutationElimination(unittest.TestCase):
         self.assertIn("mutation", survivors)
         self.assertIn("producer", survivors)
 
-    def test_mutation_into_target_read_before_it_is_kept(self):
-        """A target proven live only by an op the reverse walk reaches later.
+    def test_loop_accumulator_write_is_kept(self):
+        """A spliced loop body keeps an accumulator write read ahead of it.
 
-        ``reader`` sits between the target and the mutation, so a single reverse
-        pass judges the mutation before learning the target is live and drops the
-        write. Pins the iteration to a fixed point.
+        ``R = acc * 2; acc <- R + 1`` with only ``R`` observed. In a while-loop
+        body the read at the top sees the write at the bottom on the next trip,
+        although it precedes the write in list order. A single reverse pass
+        judges the write before learning ``acc`` is live and drops it, so this
+        pins the iteration to a fixed point.
         """
+        acc = self._make_buffer("acc")
+        reader = self._make_buffer("reader", reads="acc")
+        mutation = self._make_buffer("mutation", reads="reader")
+        mutation.layout = MutationLayoutSHOULDREMOVE(acc)
+
+        survivors = self._run([acc, reader, mutation], output_names=["reader"])
+
+        self.assertIn("mutation", survivors)
+        self.assertIn("acc", survivors)
+
+    def test_live_mutation_keeps_its_target(self):
+        """A mutation that survives keeps the buffer it writes into."""
         target = self._make_buffer("target")
-        reader = self._make_buffer("reader", reads="target")
         producer = self._make_buffer("producer")
         mutation = self._make_buffer("mutation", reads="producer")
         mutation.layout = MutationLayoutSHOULDREMOVE(target)
 
-        survivors = self._run(
-            [target, reader, producer, mutation], output_names=["reader"]
-        )
+        survivors = self._run([target, producer, mutation], output_names=["mutation"])
+
+        self.assertIn("mutation", survivors)
+        self.assertIn("target", survivors)
+        self.assertNotIn("target", V.graph.removed_buffers)
+
+    def test_mutation_into_constant_is_kept(self):
+        """A frozen constant is observable even though it is no output."""
+        target = self._make_buffer("const_target")
+        producer = self._make_buffer("producer")
+        mutation = self._make_buffer("mutation", reads="producer")
+        mutation.layout = MutationLayoutSHOULDREMOVE(target)
+        V.graph.constants["const_target"] = torch.zeros(8)
+
+        survivors = self._run([target, producer, mutation], output_names=[])
 
         self.assertIn("mutation", survivors)
         self.assertIn("producer", survivors)
@@ -160,6 +185,10 @@ class TestForEachTileCarryIsCollected(unittest.TestCase):
     What the chain lowers to is not the point and will change: whether its ops
     are pure or mutate the carry's own buffer in place decides which liveness
     rule retires them, and only the outcome is asserted here.
+
+    This is characterization, not regression coverage for the dead-mutation
+    rule: it passes with that rule reverted too, as the chain then lowers to
+    ops the older rule already retires. The unit tests above pin the rule.
     """
 
     def test_spliced_carry_scaffolding_is_collected(self):
