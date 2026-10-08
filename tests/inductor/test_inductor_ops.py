@@ -77,6 +77,18 @@ POINTWISE_BINARY_OPS_INT64_DICT = {
     "maximum": torch.maximum,
 }
 
+# Ops with a dedicated native-integer intrinsic on Spyre (addi32toi32 / muli32toi32).
+_NATIVE_INT32_OPS_DICT = {
+    "add": torch.add,
+    "mul": torch.mul,
+}
+
+# 2**24 + 1 = 16_777_217 — the first integer not exactly representable in fp32.
+_FIRST_INT32_BEYOND_FP32 = 2**24 + 1
+
+# 2**31 - 1 = 2_147_483_647 — INT32_MAX.
+_INT32_MAX = 2**31 - 1
+
 CORE_REDUCTION_OPS_DICT = {
     "sum": torch.sum,
     "mean": torch.mean,
@@ -1005,6 +1017,84 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "3d": (
                     torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
                     torch.randint(-100, 100, (67, 71, 256), dtype=torch.int64),
+                ),
+            },
+        },
+        # Large-value int64 add/mul (physically IEEE_INT32 on device):
+        # same _FIRST_INT32_BEYOND_FP32 boundary proof for the int64 native path.
+        (
+            "test_native_int64_large_values",
+            "test_binary_op",
+        ): {
+            "ops_dict": _NATIVE_INT32_OPS_DICT,
+            "param_sets": {
+                "1d_int64": (
+                    torch.full((256,), _FIRST_INT32_BEYOND_FP32, dtype=torch.int64),
+                    torch.full((256,), 1, dtype=torch.int64),
+                ),
+                "2d_int64": (
+                    torch.full((67, 256), _FIRST_INT32_BEYOND_FP32, dtype=torch.int64),
+                    torch.full((67, 256), 1, dtype=torch.int64),
+                ),
+                "1d_int64_mul_large_both": (
+                    torch.full((256,), _FIRST_INT32_BEYOND_FP32, dtype=torch.int64),
+                    torch.full((256,), 3, dtype=torch.int64),
+                ),
+            },
+        },
+        # int64 operands beyond INT32_MAX (> 2**31-1): on Spyre, int64 is
+        # physically stored as IEEE_INT32, so values exceeding _INT32_MAX
+        # cannot be represented and all param sets are expected to fail.
+        (
+            "test_native_int64_beyond_int32_large_values",
+            "test_binary_op",
+        ): {
+            "ops_dict": _NATIVE_INT32_OPS_DICT,
+            "param_sets": {
+                # add: _INT32_MAX + 1 overflows the physical int32 storage.
+                "1d_int64": (
+                    torch.full((256,), _INT32_MAX + 1, dtype=torch.int64),
+                    torch.full((256,), 1, dtype=torch.int64),
+                ),
+                "2d_int64": (
+                    torch.full((67, 256), _INT32_MAX + 1, dtype=torch.int64),
+                    torch.full((67, 256), 1, dtype=torch.int64),
+                ),
+                # mul: (_INT32_MAX + 1) * 3 also exceeds representable range.
+                "1d_int64_mul_large_both": (
+                    torch.full((256,), _INT32_MAX + 1, dtype=torch.int64),
+                    torch.full((256,), 3, dtype=torch.int64),
+                ),
+            },
+            "expect_fail": [
+                "1d_int64",
+                "2d_int64",
+                "1d_int64_mul_large_both",
+            ],
+        },
+        # addi32toi32/muli32toi32 use a SENUINT32 (unsigned) SDSC descriptor.
+        # Verify that negative broadcast operands are not mis-interpreted as
+        # unsigned when SDSC fills the broadcast lanes.
+        (
+            "test_native_int64_negative_broadcast",
+            "test_binary_op",
+        ): {
+            "ops_dict": _NATIVE_INT32_OPS_DICT,
+            "param_sets": {
+                # Stick-broadcaster (axis -1, size 1) holds a fixed negative value.
+                "2d_stick_bcast_neg": (
+                    torch.full((67, 1), -7, dtype=torch.int64),
+                    torch.randint(-100, 100, (67, 256), dtype=torch.int64),
+                ),
+                # Batch-dimension broadcaster (axis 0, size 1) with a negative value.
+                "2d_batch_bcast_neg": (
+                    torch.randint(-100, 100, (1, 256), dtype=torch.int64),
+                    torch.full((67, 256), -3, dtype=torch.int64),
+                ),
+                # Both operands negative, stick broadcast.
+                "2d_stick_bcast_both_neg": (
+                    torch.full((67, 1), -50, dtype=torch.int64),
+                    torch.full((67, 256), -1, dtype=torch.int64),
                 ),
             },
         },
