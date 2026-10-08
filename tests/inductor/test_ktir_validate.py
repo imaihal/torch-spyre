@@ -1091,12 +1091,6 @@ class TestRecipes(unittest.TestCase):
                         # need the dialect, which this module deliberately does
                         # not require.
                         self.assertTrue(callable(arm.binding))
-                # A one-armed op has to be reachable at every format, so that arm
-                # cannot list any: a lone arm claiming a format would make
-                # ``Recipe.arm`` refuse every other one.
-                if len(recipe.arms) == 1:
-                    self.assertEqual(recipe.arms[0].dtypes, ())
-
         # Every kind is now registered by some arm, so the mirror assertion is
         # worth making: PAYLOAD stopped being a hook nothing reaches when the
         # ``spyreop`` intrinsics landed on it.
@@ -1300,6 +1294,15 @@ class TestArmDispatch(unittest.TestCase):
         """Every entry that did not ask for the new discriminant ignores it."""
         for op, recipe in ktir.KtirBuilder.RECIPES.items():
             if recipe.dispatch is not ktir.request_by_dtype:
+                continue
+            # All arms claim explicit dtypes: only sweep the formats they serve.
+            arms = ktir._arms(recipe.arms)
+            if all(arm.dtypes for arm in arms):
+                for dtype in {d for arm in arms for d in arm.dtypes}:
+                    with self.subTest(op=op, dtype=dtype):
+                        self.assertIs(
+                            recipe.arm(dtype), recipe.arm(dtype, broadcast=True)
+                        )
                 continue
             for dtype in (*ktir.ElemTypes.NAMES, None):
                 with self.subTest(op=op, dtype=dtype):
@@ -1625,7 +1628,14 @@ class TestAPayloadWithNoNamedOpGetsAGeneric(unittest.TestCase):
             if recipe.attrs is not None or recipe.reduces:
                 continue
             with self.subTest(op=op):
-                spec = make_op_spec(op, inputs=recipe.arity)
+                # Format-restricted recipes only serve their claimed dtype(s);
+                # use that instead of the default so build_kernel_plan succeeds.
+                arms = ktir._arms(recipe.arms)
+                if all(arm.dtypes for arm in arms):
+                    dtype = next(iter(arms[0].dtypes))
+                    spec = make_op_spec(op, inputs=recipe.arity, dtype=dtype)
+                else:
+                    spec = make_op_spec(op, inputs=recipe.arity)
                 [step] = ktir.build_kernel_plan([spec]).steps
                 self.assertEqual(step.attrs, ())
 

@@ -3102,26 +3102,21 @@ class KtirBuilder:
     #
     # A repeated key here is ruff F601, so an op cannot be declared twice.
     RECIPES: ClassVar[dict[str, Recipe]] = {
-        # ``add``, ``mul`` and ``sub`` carry two arms each:
-        #
-        #   * a NAMED linalg op (aligned operands -- the common case) and an
-        #     ``arith`` scalar fallback for broadcast operands, because a named
-        #     linalg op states its own identity indexing and a broadcast
-        #     operand's derived map row has nowhere to go
-        #     (``_broadcast_surface``).  The ``arith`` scalar goes in a
-        #     generic's region, which states every row.
-        #     ``request_scalar_when_broadcast`` selects the scalar exactly then.
-        #     This is what softmax's ``x - rowmax`` needs, and with it the KTIR
-        #     path's softmax matches the SDSC path's exactly (verify.py).
+        # ``add``, ``mul`` and ``sub`` each have two arms: a NAMED linalg op for
+        # the common aligned case, and an ``arith`` scalar fallback for broadcast
+        # operands.  A named linalg op states its own identity indexing, so a
+        # broadcast operand's derived map row has nowhere to go
+        # (``_broadcast_surface``); the scalar arm lives in a generic's region,
+        # which states every row, and ``request_scalar_when_broadcast`` selects
+        # it exactly then.  This is what softmax's ``x - rowmax`` needs.
         #
         # The named arm is FIRST because two dtype-less arms of different kinds
-        # resolve in declaration order (``request_by_dtype``), and the aligned
-        # operands that keep the named op are the common case: every emitter
-        # golden is a named ``add``.
+        # resolve in declaration order, and aligned operands (the named op) are
+        # the common case: every emitter golden is a named ``add``.
         #
         # Integer (IEEE_INT32) add/mul arrive as ``addi32toi32`` / ``muli32toi32``
         # — chosen by ``SpyreOpFuncs.add`` / ``SpyreOpFuncs.mul`` — so these
-        # entries handle float operands only.
+        # float entries never see IEEE_INT32.
         "add": Recipe(
             arity=2,
             dispatch=request_scalar_when_broadcast,

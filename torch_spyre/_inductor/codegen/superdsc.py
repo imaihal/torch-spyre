@@ -1142,9 +1142,9 @@ def _get_data_format(op, device_dtype):
 def _get_sdsc_spec_data_format(op, arg_data_format):
     """Return the SDSC compute format for an operation.
 
-    For fp32<->int32 dtype-conversion ops, the SDSC spec must report fp32 as
-    the op's data format, but unlike `_get_data_format`'s IDENTITY_OP case,
-    the int32 tensor descriptor itself stays int32.
+    dtype-conversion ops (fp32↔int32) and native int32 ops (addi32toi32,
+    muli32toi32) must report IEEE_FP32 as the SDSC spec's compute format;
+    all other ops pass the tensor format through unchanged.
     See backend issue deeptools#4307.
     """
     if op in (FP32TOINT32_OP, INT32TOFP32_OP, *SPYRE_INT32_OPS):

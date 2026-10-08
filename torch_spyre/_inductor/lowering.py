@@ -1939,13 +1939,12 @@ def lower_where(condition, self, other):
     return result
 
 
-# Use type_promotion_kind=None because DEFAULT cannot assign the appropriate EA.
-# For example, with FP16→FP32 type promotion, DEFAULT performs the promotion
-# before layout propagation, resulting in an IR node with STANDARD EA.
-# In contrast, with None, the FP16 operand survives into the fused body,
-# allowing propagate_layouts to assign the correct DL16_TO_FP32 EA.
-# lowering.add applies default promotion; when the result stays int32,
-# SpyreOpFuncs.add emits addi32toi32.
+# type_promotion_kind=None: DEFAULT performs FP16→FP32 promotion before layout
+# propagation, leaving an IR node with STANDARD EA.  With None the FP16 operand
+# survives into the fused body so propagate_layouts can assign DL16_TO_FP32 EA.
+# The underlying lowering applies default promotion; when both operands stay
+# int32, SpyreOpFuncs.add / SpyreOpFuncs.mul emits the dedicated hardware op
+# (addi32toi32 / muli32toi32).
 @register_spyre_lowering(
     torch.ops.aten.add.Tensor,
     type_promotion_kind=None,
@@ -1965,13 +1964,7 @@ def lower_add(x, y, *, alpha=1):
     return lowering.add(x, y)
 
 
-# Use type_promotion_kind=None because DEFAULT cannot assign the appropriate EA.
-# For example, with FP16→FP32 type promotion, DEFAULT performs the promotion
-# before layout propagation, resulting in an IR node with STANDARD EA.
-# In contrast, with None, the FP16 operand survives into the fused body,
-# allowing propagate_layouts to assign the correct DL16_TO_FP32 EA.
-# lowering.mul applies default promotion; when the result stays int32,
-# SpyreOpFuncs.mul emits muli32toi32.
+# Same type_promotion_kind=None rationale as lower_add above.
 @register_spyre_lowering(
     torch.ops.aten.mul.Tensor,
     type_promotion_kind=None,
