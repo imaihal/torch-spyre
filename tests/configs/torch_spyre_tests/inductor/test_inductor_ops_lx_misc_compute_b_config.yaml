@@ -5,8 +5,8 @@
 # Auto-split of test_inductor_ops_lx_planning.py, mirroring the
 # test_inductor_ops.py config sharding. The full (non-truncated) test
 # set is enabled in CI via TEST_LX_PLANNING_FULL=1 + TEST_LX_PLANNING_RUN_SKIPS=1
-# (see .github/workflows/_test_matrix.yaml). The xfail lists below are
-# the source of truth for known LX-planning failures (the in-file .py
+# (see .github/workflows/_test_matrix.yaml). Known LX-planning failures are
+# listed as `mode: xfail` blocks (none at present; the in-file .py
 # skip-lists were removed as duplicates).
 test_suite_config:
   labels: [regression, trunk]
@@ -18,10 +18,6 @@ test_suite_config:
         # xfail: an unexpected pass (XPASS) does not fail CI. Entries failing
         # in both wraps collapse to (pointwise|reduction).
         - names:
-            - LxPlanning.*::test_restickify_add_transpose_10x20_add_transpose_lx_planning_(pointwise|reduction)
-            - LxPlanning.*::test_restickify_add_transpose_64x129_add_transpose_lx_planning_(pointwise|reduction)
-            - LxPlanning.*::test_restickify_add_transpose_7x13_add_transpose_lx_planning_(pointwise|reduction)
-            - LxPlanning.*::test_where_self_out_where_fp16_2d_lx_planning_pointwise
             # fp16_fp32_1d256 is in expect_fail (mixed EA, stick reordering unsupported)
             - LxPlanning.*::test_div_mixed_dtype_true_div_fp16_fp32_1d256_lx_planning_(pointwise|reduction)
             - LxPlanning.*::test_div_mixed_dtype_floor_div_fp16_fp32_1d256_lx_planning_(pointwise|reduction)
