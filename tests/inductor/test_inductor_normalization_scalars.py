@@ -261,7 +261,8 @@ class TestNormalizationScalarOperations:
         x = cached_randn((32, 768), dtype=torch.float32)
         _compare_modes(execution_mode, batchnorm_1d_inference, x, atol=1e-4, rtol=1e-3)
 
-    # TODO: ISSUE https://github.com/torch-spyre/torch-spyre/issues/2544
+    # TODO: ISSUE https://github.com/torch-spyre/torch-spyre/issues/1377 (eager)
+    # TODO: ISSUE https://github.com/torch-spyre/torch-spyre/issues/2544 (compiled)
     def test_batchnorm_identity_affine_2d(self, execution_mode, request):
         """2D norm with identity running stats plus gamma/beta."""
         if execution_mode == "eager":
