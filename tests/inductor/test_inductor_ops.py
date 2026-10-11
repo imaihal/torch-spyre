@@ -623,13 +623,18 @@ def _dlfloat16_saturating_ref(result):
     return result.masked_fill(result.abs() > DLFLOAT16_MAX, float("nan"))
 
 
-def _replace_near_zero(t: torch.Tensor) -> None:
-    """Replace near-zero values in *t* in-place to avoid division-by-zero.
+def _bound_divisor(t: torch.Tensor, numerator: torch.Tensor = None) -> None:
+    """Replace near-zero values in *t* in-place to avoid division-by-zero
+    and out-of-range integer quotients.
 
     The threshold (EPS) is chosen per dtype:
-      - int64  → 1
+      - int64   → 1
       - float32 → FP32_EPS
-      - other  → FP16_EPS
+      - other   → FP16_EPS
+
+    When *numerator* is provided and *t* is a floating-point tensor, enforce a
+    minimum divisor magnitude so |numerator / t| <= exact_int_max (1024 for
+    fp16, 2**24 for fp32).
     """
     if t.dtype == torch.int64:
         eps = 1
@@ -637,7 +642,16 @@ def _replace_near_zero(t: torch.Tensor) -> None:
         eps = FP32_EPS
     else:
         eps = FP16_EPS
+
+    if numerator is not None and t.dtype.is_floating_point:
+        exact_int_max = 1024 if t.dtype == torch.float16 else 2**24
+        eps = max(eps, float(numerator.abs().max()) / exact_int_max)
+
     t[torch.abs(t) < eps] = eps
+
+
+def _floor_div(a, b):
+    return torch.div(a, b, rounding_mode="floor")
 
 
 def _attention_fn(q, k, v, scale=True):
@@ -7105,13 +7119,18 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_div_mixed_dtype", "test_div_mixed_dtype_cpu"): {
             "ops_dict": {
                 "true_div": lambda a, b: torch.div(a, b),
-                "floor_div": lambda a, b: torch.div(a, b, rounding_mode="floor"),
+                "floor_div": _floor_div,
             },
             "expect_fail": [
                 "fp16_fp32_1d256",
                 "fp32_fp16_1d256",
                 "fp16_fp32_2d4x64",
                 "fp32_fp16_2d4x64",
+                # int32_fp16_1d256 floor_div fails exact comparison (atol=0) due
+                # to fp16 intermediate product-rounding limit: when quotient * divisor
+                # exceeds fp16 precision (10-11 bit mantissa), residual arithmetic
+                # cannot trigger the needed -1 quotient correction.
+                "int32_fp16_1d256",
             ],
             "param_sets": {
                 # fp16 -> fp32 is stick-reordering: blocked by mixed EA
@@ -7192,7 +7211,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_div_scalar_dtypes", "test_div_scalar_dtypes_cpu"): {
             "ops_dict": {
                 "true_div": lambda a, b: torch.div(a, b),
-                "floor_div": lambda a, b: torch.div(a, b, rounding_mode="floor"),
+                "floor_div": _floor_div,
             },
             "param_sets": {
                 # bool tensor vs int/float scalars
@@ -7369,7 +7388,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         if op == torch.div:
             # TODO: Division by 0 or near-zero differs on Spyre from CPU, sidestep for now.
             if isinstance(b, torch.Tensor):
-                _replace_near_zero(b)
+                _bound_divisor(b, numerator=a if isinstance(a, torch.Tensor) else None)
 
         self.compare_with_cpu(op, a, b)
 
@@ -10585,7 +10604,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             return torch.div(a, b, rounding_mode=rounding_mode)
 
         if isinstance(y, torch.Tensor):
-            _replace_near_zero(y)
+            _bound_divisor(y, numerator=x if isinstance(x, torch.Tensor) else None)
 
         # floor/trunc division is exact integer arithmetic, so compare exactly.
         # At the default atol=rtol=0.1 an off-by-one quotient is tolerated for
@@ -10598,8 +10617,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_div_mixed_dtype_cpu(self, op, x, y):
         """Test torch.div type promotion across mixed tensor dtypes."""
         if isinstance(y, torch.Tensor):
-            _replace_near_zero(y)
-        self.compare_with_cpu(op, x, y)
+            _bound_divisor(y, numerator=x if isinstance(x, torch.Tensor) else None)
+        tol_kwargs = {"atol": 0, "rtol": 0} if op is _floor_div else {}
+        self.compare_with_cpu(op, x, y, **tol_kwargs)
 
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
@@ -10607,7 +10627,8 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         """Test torch.div type promotion with Python scalar operands."""
         if isinstance(scalar, (int, float)) and abs(scalar) < FP16_EPS:
             scalar = 1.0
-        self.compare_with_cpu(op, x, scalar)
+        tol_kwargs = {"atol": 0, "rtol": 0} if op is _floor_div else {}
+        self.compare_with_cpu(op, x, scalar, **tol_kwargs)
 
 
 _TEST_LARGE_MATMUL_FP32_PROXY_SHAPES = _derive_test_large_matmul_fp32_proxy_shapes(
