@@ -2060,7 +2060,8 @@ def _div_operand_dtypes(x, y):
       int64 / int64   | fp32      | int64        | yes (floor only)
       int32 / fp32    | fp32      | fp32         | no
       int32 / fp16    | fp16      | fp16         | no (fp16 dominates)
-      bool / bool     | fp32      | bool         | yes (floor only)
+      int64 / fp32    | fp32      | fp32         | no
+      int64 / fp16    | fp16      | fp16         | no (fp16 dominates)
       bool / fp16     | fp16      | fp16         | no (fp16 dominates)
       bool / fp32     | fp32      | fp32         | no (fp32 dominates)
       bool / int32    | fp32      | int32        | yes (floor only)
@@ -2106,9 +2107,16 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
     if rounding_mode == "floor":
         # All operands are now at comp_dtype (fp32 for integer inputs).
         # Each _realized call is a fusion barrier (Spyre requires one op per SDSC).
-        # lowering.<fn> (Inductor built-ins) are used throughout rather than the
-        # Spyre lower_* wrappers: all operands are already at comp_dtype, so the
-        # wrappers' condition-cast and INT_TO_FLOAT promotion would both be no-ops.
+        # Inductor built-ins (lowering.<fn> / lowering.lowerings[...]) are used
+        # throughout rather than the Spyre lower_* wrappers: all operands are
+        # already at comp_dtype, and using the built-ins avoids emitting compound
+        # or non-composable intermediate wrapper ops that break SDSC single-op invariants.
+        #
+        # The +-1 quotient correction is only meaningful while the compute dtype's
+        # spacing is below 1 -- |q| <= 1024 for device fp16, |q| <= 2**24 for fp32.
+        # Above that, qf +- 1 rounds back to qf and the result is whatever the divider
+        # returned. Exact integer division beyond that range needs the quotient carried
+        # in more than one float; out of scope here.
         qf = _realized(lowering.div(x, y))
         qf = _realized(lowering.floor(qf))
         qf_initial = qf
@@ -2126,7 +2134,6 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # cannot both hold), so at most one correction is applied per element.
         aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
         aten_lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
-        aten_ne = lowering.lowerings[torch.ops.aten.ne.Tensor]
         prod = _realized(lowering.mul(qf, y))
         rem = _realized(lowering.sub(x, prod))
         if hasattr(y, "get_dtype"):
