@@ -7130,7 +7130,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 # to fp16 intermediate product-rounding limit: when quotient * divisor
                 # exceeds fp16 precision (10-11 bit mantissa), residual arithmetic
                 # cannot trigger the needed -1 quotient correction.
-                "int32_fp16_1d256",
+                "floor_div_int32_fp16_1d256",
             ],
             "param_sets": {
                 # fp16 -> fp32 is stick-reordering: blocked by mixed EA
