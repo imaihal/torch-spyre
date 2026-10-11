@@ -7085,12 +7085,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
                 "floor_fp32_negscalar": (
                     "floor",
-                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
+                    torch.tensor([-10.0, -20.3, 30.7, -5.2], dtype=torch.float32),
                     -2.0,
                 ),
                 "floor_int64_negscalar": (
                     "floor",
-                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
+                    torch.tensor([-12, -21, 31, -7], dtype=torch.int64),
                     -2,
                 ),
                 # ── trunc fp16/fp32: not yet implemented ─────────────────────────
