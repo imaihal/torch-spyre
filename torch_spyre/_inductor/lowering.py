@@ -2111,6 +2111,7 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # wrappers' condition-cast and INT_TO_FLOAT promotion would both be no-ops.
         qf = _realized(lowering.div(x, y))
         qf = _realized(lowering.floor(qf))
+        qf_initial = qf
         # Quotient correction. Correct floor-division satisfies
         #   0 <= rem*sign(y) < |y|,   where rem = x - qf*y        … (*)
         # which holds for EITHER sign of y.  rem is computed via multiply-
@@ -2125,6 +2126,7 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # cannot both hold), so at most one correction is applied per element.
         aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
         aten_lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
+        aten_ne = lowering.lowerings[torch.ops.aten.ne.Tensor]
         prod = _realized(lowering.mul(qf, y))
         rem = _realized(lowering.sub(x, prod))
         if hasattr(y, "get_dtype"):
@@ -2146,6 +2148,13 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # compose instead of the second silently discarding the first.
         qf_minus1 = _realized(lowering.sub(qf, 1.0))
         qf = _realized(lowering.where(under_est, qf_minus1, qf))
+        # |x| < |y| => the quotient is 0 or -1 by sign alone. Do not apply residual
+        # correction there: x + y is not always representable, and a rounded-up residual
+        # trips over_est and turns a correct -1 into 0. The initial floor(div(x, y))
+        # is already exact (-1.0 or 0.0) when |x| < |y|.
+        abs_x = _realized(lowering.abs(x))
+        degenerate = _realized(aten_lt(abs_x, abs_y))
+        qf = _realized(lowering.where(degenerate, qf_initial, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
         if result_dtype is not None and result_dtype != comp_dtype:
             return to_dtype(qf, result_dtype)
