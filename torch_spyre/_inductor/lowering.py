@@ -2194,7 +2194,7 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         qf = _realized(lowering.where(degenerate, qf_initial, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
         if result_dtype is not None and result_dtype != comp_dtype:
-            return to_dtype(qf, result_dtype)
+            return to_dtype(qf, result_dtype, skip_trunc=True)
         return qf
 
     elif rounding_mode == "trunc":
