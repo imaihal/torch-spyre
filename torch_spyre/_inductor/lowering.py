@@ -2147,6 +2147,20 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # Above that, qf +- 1 rounds back to qf and the result is whatever the divider
         # returned. Exact integer division beyond that range needs the quotient carried
         # in more than one float; out of scope here.
+        #
+        # Two further limits apply within the quotient-magnitude bound:
+        #
+        # (1) Residual destruction. Even with |q| <= 1024, the correction can fail
+        #     when qf*y rounds back to exactly x, leaving rem=0 and the correction
+        #     blind. This affects ~2.7% of random fp16 pairs that are representable
+        #     on device and have |q| <= 1024. The bound is necessary but not
+        #     sufficient for exact floor division.
+        #
+        # (2) fp16 host inputs are re-rounded on arrival. Device fp16 is DL16, not
+        #     IEEE fp16, so values like 1853 arrive as 1854 before any lowering
+        #     runs. A host-side .float() before transfer preserves the intended
+        #     value; no on-device upcast can recover it. A host-fp16 reference is
+        #     therefore not a valid expectation for this op.
         qf = _realized(lowering.div(x, y))
         qf = _realized(lowering.floor(qf))
         qf_initial = qf
@@ -2185,13 +2199,23 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # compose instead of the second silently discarding the first.
         qf_minus1 = _realized(lowering.sub(qf, 1.0))
         qf = _realized(lowering.where(under_est, qf_minus1, qf))
-        # |x| < |y| => the quotient is 0 or -1 by sign alone. Do not apply residual
-        # correction there: x + y is not always representable, and a rounded-up residual
-        # trips over_est and turns a correct -1 into 0. The initial floor(div(x, y))
-        # is already exact (-1.0 or 0.0) when |x| < |y|.
+        # |x| < |y| => the quotient is 0 or -1 by sign alone. Do not apply
+        # residual correction there: x + y is not always representable, and a
+        # rounded-up residual trips over_est and turns a correct -1 into 0.
+        #
+        # The initial floor(div(x, y)) is exact when |x/y| is representable,
+        # but underflows to -0.0 when |x/y| < ~2^-32 (device DL16 subnormal
+        # floor). When it underflows, the residual path is correct (prod=0,
+        # rem=x, rem_s<0 → qf corrects to -1) and the unconditional restore
+        # breaks it. Guard with qf_initial < 0.0: only restore when floor(x/y)
+        # is representable as -1. lt(-0.0, 0.0) is false, so -0.0 falls
+        # through to the residual path.
         abs_x = _realized(lowering.abs(x))
         degenerate = _realized(aten_lt(abs_x, abs_y))
-        qf = _realized(lowering.where(degenerate, qf_initial, qf))
+        keep = _realized(
+            lowering.where(_realized(aten_lt(qf_initial, 0.0)), qf_initial, qf)
+        )
+        qf = _realized(lowering.where(degenerate, keep, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
         if result_dtype is not None and result_dtype != comp_dtype:
             return to_dtype(qf, result_dtype, skip_trunc=True)

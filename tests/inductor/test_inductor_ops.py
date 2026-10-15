@@ -7360,12 +7360,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ("test_split_multi_ops_view_loads", "test_split_multi_ops_view_loads_cpu"): {
             "ops_dict": {
                 "mul_2_rows": lambda x: x.select(0, 0) * x.select(0, 1),
-                "mul_3_rows": lambda x: x.select(0, 0)
-                * x.select(0, 1)
-                * x.select(0, 2),
-                "add_3_rows": lambda x: x.select(0, 0)
-                + x.select(0, 1)
-                + x.select(0, 2),
+                "mul_3_rows": lambda x: (
+                    x.select(0, 0) * x.select(0, 1) * x.select(0, 2)
+                ),
+                "add_3_rows": lambda x: (
+                    x.select(0, 0) + x.select(0, 1) + x.select(0, 2)
+                ),
             },
             "param_sets": {
                 "3x32": (
@@ -7718,11 +7718,17 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((67, 256), dtype=torch.float32, abs=True, scale=10.0),
                 ),
             },
-            "expect_fail": [
-                "trunc_int64_rand_2d",
-                "trunc_fp16_rand_2d",
-                "trunc_fp32_rand_2d",
-            ],
+            "expect_fail": {
+                "trunc_int64_rand_2d": (
+                    "div with rounding_mode='trunc' raises Unsupported; #3610"
+                ),
+                "trunc_fp16_rand_2d": (
+                    "div with rounding_mode='trunc' raises Unsupported; #3610"
+                ),
+                "trunc_fp32_rand_2d": (
+                    "div with rounding_mode='trunc' raises Unsupported; #3610"
+                ),
+            },
         },
         # -----------------------------------------------------------------------
         # Mixed-dtype division (true division and floor division):
@@ -7733,17 +7739,24 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "true_div": lambda a, b: torch.div(a, b),
                 "floor_div": _floor_div,
             },
-            "expect_fail": [
-                "fp16_fp32_1d256",
-                "fp32_fp16_1d256",
-                "fp16_fp32_2d4x64",
-                "fp32_fp16_2d4x64",
-                # int32_fp16_1d256 floor_div fails exact comparison (atol=0) due
-                # to fp16 intermediate product-rounding limit: when quotient * divisor
-                # exceeds fp16 precision (10-11 bit mantissa), residual arithmetic
-                # cannot trigger the needed -1 quotient correction.
-                "floor_div_int32_fp16_1d256",
-            ],
+            "expect_raise": {
+                "fp16_fp32_1d256": "Multi-arg pointwise with mixed EA",
+                "fp32_fp16_1d256": "Multi-arg pointwise with mixed EA",
+                "fp16_fp32_2d4x64": "Multi-arg pointwise with mixed EA",
+                "fp32_fp16_2d4x64": "Multi-arg pointwise with mixed EA",
+            },
+            "expect_fail": {
+                # fp16 intermediate product rounding can zero the residual and
+                # blind the +-1 correction: when qf*y rounds back to x exactly,
+                # rem=0 and neither over_est nor under_est fires. Affects ~2.7%
+                # of random fp16 pairs that are exact on device and have
+                # |q|<=1024. This case pins one element of that class; #TODO
+                "floor_div_int32_fp16_1d256": (
+                    "fp16 intermediate product rounding can zero the residual "
+                    "and blind the +-1 correction; this case pins one element "
+                    "of that class, #TODO"
+                ),
+            },
             "param_sets": {
                 # fp16 -> fp32 is stick-reordering: blocked by mixed EA
                 "fp16_fp32_1d256": (
