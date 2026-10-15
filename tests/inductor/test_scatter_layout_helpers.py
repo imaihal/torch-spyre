@@ -34,7 +34,6 @@ from torch_spyre._inductor.nonstick_dim_order import (
     _ia_rotate_stl,
     _indirect_stride_idx,
 )
-from torch_spyre._inductor.errors import Unsupported
 from torch_spyre._inductor.ir import FixedTiledLayout
 from torch_spyre._inductor.op_spec import IndirectAccess
 
