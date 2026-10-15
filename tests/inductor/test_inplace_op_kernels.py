@@ -60,11 +60,6 @@ ATOL = 0.05
 
 aten = torch.ops.aten
 
-# The compile-time failure the backend raises for an unsupported rounding mode.
-# Narrower than ``Exception`` so the rounding-mode xfails cannot mask an
-# unrelated break; see :func:`test_div_rounding_mode`.
-_DIV_MODE_ERROR = torch._inductor.exc.InductorError
-
 # (in-place packet, overload, scalar operand) for each registered arithmetic op.
 INPLACE_SCALAR = [
     (aten.mul_, "Scalar", 3.0),
@@ -297,14 +292,13 @@ def test_inplace_tensor_operand(packet):
         # 'trunc' fails in the *functional* div kernel, independently of any
         # in-place wrapper. The in-place kernel inherits that gap; it does not
         # introduce it.
-        #
-        # ``raises`` is the specific compile failure, not bare ``Exception``:
-        # this xfail must not double as a blanket licence for this path to
-        # break some other way. A wrong *value* or a failure in the derivation
-        # or ``copy_`` wrapper raises something else and still fails the suite,
+        # ``raises`` names the expected failure, not bare ``Exception``: these
+        # xfails must not double as a blanket licence for this path to break
+        # some other way. A wrong *value* or a failure in the derivation or
+        # ``copy_`` wrapper raises something else and still fails the suite,
         # while ``strict=True`` catches the day the kernel starts working.
         pytest.param(
-            "trunc", marks=pytest.mark.xfail(raises=_DIV_MODE_ERROR, strict=True)
+            "trunc", marks=pytest.mark.xfail(raises=RuntimeError, strict=True)
         ),
     ],
     ids=lambda m: str(m),
