@@ -38,7 +38,6 @@ from torch._inductor.ir import (
     ComputedBuffer,
     FixedLayout,
     InputBuffer,
-    MultiOutput,
     IRNode,
     MutableBox,
     MutationLayoutSHOULDREMOVE,
@@ -252,9 +251,9 @@ def _create_restickify_node(
         # directly; realize() inside lower_restickify registers the output in
         # graph.buffers and graph.operations.
         arg_buf = graph_lowering.get_buffer(arg_name)
-        assert isinstance(arg_buf, (ComputedBuffer, MultiOutput)), (
+        assert isinstance(arg_buf, ComputedBuffer), (
             f"_create_restickify_node: buffer {arg_name!r} not found in env and is "
-            f"{type(arg_buf).__name__}, not ComputedBuffer/MultiOutput — cannot restickify"
+            f"{type(arg_buf).__name__}, not ComputedBuffer — cannot restickify"
         )
         arg_tb = TensorBox(StorageBox(arg_buf))
         # Insert a synthetic FX node for origins — downstream code (e.g.
