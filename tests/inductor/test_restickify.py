@@ -1768,11 +1768,6 @@ def test_size1_input_stick_transpose_0_last_clone(shape):
     "shape", SIZE1_INPUT_STICK, ids=lambda p: "x".join(map(str, p))
 )
 def test_size1_input_stick_transpose_0_last_contiguous_producer(shape, dtype):
-    if dtype == torch.int32:
-        # Native IEEE_INT32 add is not supported yet; PR #4462 will fix this.
-        pytest.xfail(
-            "native IEEE_INT32 add is not supported yet (torch-spyre PR #4462)"
-        )
     x = _arange(*shape, span=511, dtype=dtype)
     _strict(lambda x: (x + x).transpose(0, -1).contiguous(), x)
 
@@ -1795,11 +1790,6 @@ SIZE1_INPUT_STICK_CROSSING = [(7, 67, 1), (5, 67, 1), (3, 130, 1)]
     "shape", SIZE1_INPUT_STICK_CROSSING, ids=lambda p: "x".join(map(str, p))
 )
 def test_size1_input_stick_crossing_transpose_0_last_contiguous_producer(shape, dtype):
-    if dtype == torch.int32:
-        # Native IEEE_INT32 add is not supported yet; PR #4462 will fix this.
-        pytest.xfail(
-            "native IEEE_INT32 add is not supported yet (torch-spyre PR #4462)"
-        )
     x = _arange(*shape, span=511, dtype=dtype)
     _strict(lambda x: (x + x).transpose(0, -1).contiguous(), x)
 
@@ -1907,11 +1897,6 @@ SIZE1_NEW_STICK = [
     ],
 )
 def test_size1_new_stick_transpose_contiguous(shape, dims, dtype):
-    if dtype == torch.int32:
-        # Native IEEE_INT32 add is not supported yet; PR #4462 will fix this.
-        pytest.xfail(
-            "native IEEE_INT32 add is not supported yet (torch-spyre PR #4462)"
-        )
     x = _arange(*shape, span=511, dtype=dtype)
     _strict(lambda x: (x + x).transpose(*dims).contiguous(), x)
 
@@ -2105,8 +2090,8 @@ def test_real_dim_into_stick_transpose_clone_graph_input(perm, dtype):
 #
 #   clone arm:    x.permute(p).contiguous()            -- restickify reads a bare
 #                 graph input; the pass inserts + grows an identity clone.
-#   producer arm: (x + x * 3.0).permute(p).contiguous() -- a pointwise op
-#                 materialises a ComputedBuffer the pass grows in place.  x * 3.0
+#   producer arm: (x + x * 3).permute(p).contiguous() -- a pointwise op
+#                 materialises a ComputedBuffer the pass grows in place.  x * 3
 #                 keeps the producer from folding away, so this exercises a path
 #                 the clone arm does not.
 #
@@ -2146,10 +2131,10 @@ def test_full_perm_sweep_transpose_clone_graph_input(perm, dtype):
 )
 @pytest.mark.parametrize("perm", _ALL_PERMS, ids=lambda p: "".join(map(str, p)))
 def test_full_perm_sweep_transpose_contiguous_producer(perm, dtype):
-    # t + t * 3.0 == 4 * t.  For fp16, 4 * span <= 1024 is required; span=255
+    # t + t * 3 == 4 * t.  For fp16, 4 * span <= 1024 is required; span=255
     # satisfies this.  For non-fp16 dtypes all values are exact regardless.
     x = _arange(*_SWEEP_SHAPE, span=255, dtype=dtype)
-    _strict(lambda x: (x + x * 3.0).permute(*perm).contiguous(), x)
+    _strict(lambda x: (x + x * 3).permute(*perm).contiguous(), x)
 
 
 # The producer arm on the aligned shape [3,1,5,64] at the default core count, so
@@ -2168,7 +2153,7 @@ _ALIGNED_SWEEP_SHAPE = (3, 1, 5, 64)
 @pytest.mark.parametrize("perm", _ALL_PERMS, ids=lambda p: "".join(map(str, p)))
 def test_full_perm_sweep_aligned_producer(perm, dtype):
     x = _arange(*_ALIGNED_SWEEP_SHAPE, span=255, dtype=dtype)
-    _strict(lambda x: (x + x * 3.0).permute(*perm).contiguous(), x)
+    _strict(lambda x: (x + x * 3).permute(*perm).contiguous(), x)
 
 
 # Producer-arm restickify at the DEFAULT core count on the unaligned shape
@@ -2199,10 +2184,10 @@ _INTO_SWEEP_SHAPE = (5, 3, 66)
     ids=lambda p: "".join(map(str, p)),
 )
 def test_full_perm_sweep_into_producer_default_cores(perm, dtype):
-    # t + t * 3.0 == 4 * t.  span=255 satisfies fp16's 4*span<=1024 limit and
+    # t + t * 3 == 4 * t.  span=255 satisfies fp16's 4*span<=1024 limit and
     # is exact for all non-fp16 dtypes.
     x = _arange(*_INTO_SWEEP_SHAPE, span=255, dtype=dtype)
-    _strict(lambda x: (x + x * 3.0).permute(*perm).contiguous(), x)
+    _strict(lambda x: (x + x * 3).permute(*perm).contiguous(), x)
 
 
 # A size-1 dim in the input stick whose NEW stick dim spans >=2 stick blocks
