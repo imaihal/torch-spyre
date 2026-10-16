@@ -2497,6 +2497,13 @@ def compute_restickify_needed(
     # target below: a concrete target is not actionable for an unsupported input.
     if in_stl.device_dtype not in RESTICKIFY_SUPPORTED_DEVICE_DTYPES:
         return True, None
+    # Reject inputs whose element_arrangement is not STANDARD for every dtype,
+    # including fp16/bf16. compute_restickify_target_layout always builds its
+    # target as SpyreTensorLayout(..., element_arrangement=STANDARD) (the default);
+    # restickifying a staggered input (e.g. DL16_TO_FP32, FP32_TO_DL16) would
+    # silently drop the stagger and produce wrong data after the conversion.
+    if in_stl.element_arrangement != ElementArrangement.STANDARD:
+        return True, None
 
     if factorized_layout_mismatch:
         # The input layout places the contraction variable on outer axes AND the
