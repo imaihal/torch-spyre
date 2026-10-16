@@ -1768,6 +1768,11 @@ def test_size1_input_stick_transpose_0_last_clone(shape):
     "shape", SIZE1_INPUT_STICK, ids=lambda p: "x".join(map(str, p))
 )
 def test_size1_input_stick_transpose_0_last_contiguous_producer(shape, dtype):
+    if dtype == torch.int32:
+        # Native IEEE_INT32 add is not supported yet; PR #4462 will fix this.
+        pytest.xfail(
+            "native IEEE_INT32 add is not supported yet (torch-spyre PR #4462)"
+        )
     x = _arange(*shape, span=511, dtype=dtype)
     _strict(lambda x: (x + x).transpose(0, -1).contiguous(), x)
 
@@ -1790,6 +1795,11 @@ SIZE1_INPUT_STICK_CROSSING = [(7, 67, 1), (5, 67, 1), (3, 130, 1)]
     "shape", SIZE1_INPUT_STICK_CROSSING, ids=lambda p: "x".join(map(str, p))
 )
 def test_size1_input_stick_crossing_transpose_0_last_contiguous_producer(shape, dtype):
+    if dtype == torch.int32:
+        # Native IEEE_INT32 add is not supported yet; PR #4462 will fix this.
+        pytest.xfail(
+            "native IEEE_INT32 add is not supported yet (torch-spyre PR #4462)"
+        )
     x = _arange(*shape, span=511, dtype=dtype)
     _strict(lambda x: (x + x).transpose(0, -1).contiguous(), x)
 
@@ -1897,6 +1907,11 @@ SIZE1_NEW_STICK = [
     ],
 )
 def test_size1_new_stick_transpose_contiguous(shape, dims, dtype):
+    if dtype == torch.int32:
+        # Native IEEE_INT32 add is not supported yet; PR #4462 will fix this.
+        pytest.xfail(
+            "native IEEE_INT32 add is not supported yet (torch-spyre PR #4462)"
+        )
     x = _arange(*shape, span=511, dtype=dtype)
     _strict(lambda x: (x + x).transpose(*dims).contiguous(), x)
 
