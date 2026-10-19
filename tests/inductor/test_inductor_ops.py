@@ -2531,14 +2531,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(0, 100, (129, 64), dtype=torch.int64),
                 ),
             },
-            "expect_fail": {
-                "10x20_add_transpose_int32": "native IEEE_INT32 or IEEE_INT64 add is not supported yet (torch-spyre PR #4462)",
-                "7x13_add_transpose_int32": "native IEEE_INT32 or IEEE_INT64 add is not supported yet (torch-spyre PR #4462)",
-                "64x129_add_transpose_int32": "native IEEE_INT32 or IEEE_INT64 add is not supported yet (torch-spyre PR #4462)",
-                "10x20_add_transpose_int64": "native IEEE_INT32 or IEEE_INT64 add is not supported yet (torch-spyre PR #4462)",
-                "7x13_add_transpose_int64": "native IEEE_INT32 or IEEE_INT64 add is not supported yet (torch-spyre PR #4462)",
-                "64x129_add_transpose_int64": "native IEEE_INT32 or IEEE_INT64 add is not supported yet (torch-spyre PR #4462)",
-            },
         },
         ("test_restickify_clone", "test_restickify_clone_cpu"): {
             "param_sets": {
@@ -7765,6 +7757,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     -1,
                     False,
                 ),
+                "int64_dim1_2x2": (
+                    torch.randint(2, 10, (2, 2), dtype=torch.int64),
+                    -1,
+                    False,
+                ),
                 "int64_dim1_keepdim": (
                     torch.randint(2, 10, (1, 2), dtype=torch.int64),
                     -1,
@@ -7803,15 +7800,14 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     True,
                 ),
             },
-            # int64 prod over the stick dim decomposes to select+mul, and a
-            # stick-dim select reads one element per stick, a layout only a
-            # restickify can rearrange. ReStickifyOpHBM supports fp16 only.
-            "expect_fail": [
-                "int64_dim1",
-                "int64_dim1_keepdim",
-                "int64_dim1_2",
-                "int64_dim1_2_keepdim",
-            ],
+            "expect_fail": {
+                "int64_dim1": (
+                    "output size [1] triggers _make_output_stl c_size[stick_dim]==1 guard"
+                ),
+                "int64_dim1_keepdim": (
+                    "output size [1,1] triggers _make_output_stl c_size[stick_dim]==1 guard"
+                ),
+            },
         },
         ("test_unfold", "test_unfold_cpu"): {
             "param_sets": {
