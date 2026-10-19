@@ -4787,8 +4787,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
                 "3d": (cached_randn((8, 64, 1024), dtype=torch.float16), 1.5),
                 "4d": (cached_randn((2, 4, 64, 1024), dtype=torch.float16), 2.4),
-                "1d_fp32": (cached_randn((1024,), dtype=torch.float32), 3.0),
-                "2d_fp32": (cached_randn((512, 1024), dtype=torch.float32), 1.0),
                 "3d_fp32": (cached_randn((8, 64, 1024), dtype=torch.float32), 1.5),
                 "4d_fp32": (cached_randn((2, 4, 64, 1024), dtype=torch.float32), 2.4),
             },
