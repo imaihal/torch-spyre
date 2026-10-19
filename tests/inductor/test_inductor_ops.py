@@ -8713,14 +8713,14 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         # Integer (and bool) results must match exactly. With the default
         # atol/rtol of 0.1 an fp32 round-trip error of a few units on values
         # near 2**24 would still pass, so the native addi32toi32/muli32toi32
-        # path would not be distinguishable from the lossy one. Only do this
-        # when both operands are integral: a float operand keeps the tolerance.
-        all_integral = all(
-            isinstance(t, torch.Tensor)
-            and not (t.dtype.is_floating_point or t.dtype.is_complex)
-            for t in (a, b)
+        # path would not be distinguishable from the lossy one.
+        # Check the actual result dtype: e.g. torch.div on integer inputs
+        # returns float32 (true division), so exact comparison is wrong there.
+        result_dtype = op(a, b).dtype
+        integral_result = not (
+            result_dtype.is_floating_point or result_dtype.is_complex
         )
-        if all_integral:
+        if integral_result:
             self.compare_with_cpu(op, a, b, atol=0, rtol=0)
         else:
             self.compare_with_cpu(op, a, b)
