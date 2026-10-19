@@ -20,14 +20,16 @@ BATCH_MATMUL_OP = "batchmatmul"
 IDENTITY_OP = "identity"
 RESTICKIFY_OP = "ReStickifyOpHBM"
 
-# Relative restickify cost per device dtype, for the same logical tensor.
-# 32-bit formats cost 4x the fp16 restickify. Single source of truth for the
+# Relative restickify cost per device byte, by device dtype. The restickify cost
+# is (device size in bytes) x this weight. 32-bit formats take 2 passes per stick,
+# so they are 2x slower than fp16 for the same number of bytes (and therefore 4x
+# per element, since they also have 2x the bytes). Single source of truth for the
 # supported dtypes below.
 RESTICKIFY_DEVICE_DTYPE_COST_WEIGHT = {
     DataFormats.SEN169_FP16: 1,
-    DataFormats.IEEE_FP32: 4,
-    DataFormats.IEEE_INT32: 4,
-    DataFormats.SENUINT32: 4,
+    DataFormats.IEEE_FP32: 2,
+    DataFormats.IEEE_INT32: 2,
+    DataFormats.SENUINT32: 2,
 }
 RESTICKIFY_SUPPORTED_DEVICE_DTYPES = frozenset(RESTICKIFY_DEVICE_DTYPE_COST_WEIGHT)
 DEPTHWISE_CONV2D_OP = "depthwiseconv2dnative"
