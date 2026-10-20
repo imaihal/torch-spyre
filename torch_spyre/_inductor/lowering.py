@@ -2204,7 +2204,13 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
                             consistent with PyTorch true-division semantics.
     - rounding_mode="floor": comp_dtype for the correction arithmetic; cast back
                              to result_dtype at the end (int inputs → int out).
+                             Emits ~20 realize() barriers for a tensor divisor
+                             (~15 for a scalar divisor) — one per SDSC op; this
+                             is the minimum required for the sign-aware correction.
     - rounding_mode="trunc": not yet implemented (raises Unsupported).
+
+    The scalar-divisor sign optimisation (y < 0 fold) requires y to be a
+    concrete Python int or float; sympy/symbolic scalars are not supported.
     """
     comp_dtype, result_dtype = _div_operand_dtypes(x, y)
 
@@ -2267,6 +2273,11 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         else:
             # y is a Python scalar: its sign is known at compile time, so fold
             # it statically instead of emitting the select.
+            # Only concrete int/float scalars reach here; symbolic values are
+            # not supported (comparison with sympy raises TypeError).
+            assert isinstance(y, (int, float)), (
+                f"_lower_div_impl: scalar divisor must be int or float, got {type(y)}"
+            )
             rem_s = _realized(lowering.neg(rem)) if y < 0 else rem
             abs_y = -y if y < 0 else y
         over_est = _realized(aten_ge(rem_s, abs_y))

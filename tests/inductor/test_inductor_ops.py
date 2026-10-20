@@ -894,9 +894,9 @@ def _dlfloat16_saturating_ref(result):
     return result.masked_fill(result.abs() > DLFLOAT16_MAX, float("nan"))
 
 
-def _bound_divisor(t: torch.Tensor, numerator: torch.Tensor = None) -> None:
-    """Replace near-zero values in *t* in-place to avoid division-by-zero
-    and out-of-range integer quotients.
+def _bound_divisor(t: torch.Tensor, numerator: torch.Tensor = None) -> torch.Tensor:
+    """Return a copy of *t* with near-zero values replaced to avoid
+    division-by-zero and out-of-range integer quotients.
 
     The threshold (EPS) is chosen per dtype:
       - int64   → 1
@@ -918,7 +918,9 @@ def _bound_divisor(t: torch.Tensor, numerator: torch.Tensor = None) -> None:
         exact_int_max = 1024 if t.dtype == torch.float16 else 2**24
         eps = max(eps, float(numerator.abs().max()) / exact_int_max)
 
+    t = t.clone()
     t[torch.abs(t) < eps] = eps
+    return t
 
 
 def _floor_div(a, b):
@@ -8392,16 +8394,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     cached_randn((67, 256), dtype=torch.float32, abs=True, scale=10.0),
                 ),
             },
-            "expect_fail": {
-                "trunc_int64_rand_2d": (
-                    "div with rounding_mode='trunc' raises Unsupported; #3610"
-                ),
-                "trunc_fp16_rand_2d": (
-                    "div with rounding_mode='trunc' raises Unsupported; #3610"
-                ),
-                "trunc_fp32_rand_2d": (
-                    "div with rounding_mode='trunc' raises Unsupported; #3610"
-                ),
+            # TODO(#3610): implement trunc-mode floor-division; remove expect_raise below
+            "expect_raise": {
+                "trunc_int64_rand_2d": "rounding_mode='trunc' is not yet implemented",
+                "trunc_fp16_rand_2d": "rounding_mode='trunc' is not yet implemented",
+                "trunc_fp32_rand_2d": "rounding_mode='trunc' is not yet implemented",
             },
         },
         # -----------------------------------------------------------------------
@@ -8413,6 +8410,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "true_div": lambda a, b: torch.div(a, b),
                 "floor_div": _floor_div,
             },
+            # TODO: remove when multi-arg pointwise with mixed EA is supported
             "expect_raise": {
                 "fp16_fp32_1d256": "Multi-arg pointwise with mixed EA",
                 "fp32_fp16_1d256": "Multi-arg pointwise with mixed EA",
@@ -8424,11 +8422,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 # blind the +-1 correction: when qf*y rounds back to x exactly,
                 # rem=0 and neither over_est nor under_est fires. Affects ~2.7%
                 # of random fp16 pairs that are exact on device and have
-                # |q|<=1024. This case pins one element of that class; #TODO
+                # |q|<=1024. This case pins one element of that class; #5605
                 "floor_div_int32_fp16_1d256": (
                     "fp16 intermediate product rounding can zero the residual "
                     "and blind the +-1 correction; this case pins one element "
-                    "of that class, #TODO"
+                    "of that class, #5605"
                 ),
             },
             "param_sets": {
@@ -8708,7 +8706,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         if op == torch.div:
             # TODO: Division by 0 or near-zero differs on Spyre from CPU, sidestep for now.
             if isinstance(b, torch.Tensor):
-                _bound_divisor(b, numerator=a if isinstance(a, torch.Tensor) else None)
+                b = _bound_divisor(
+                    b, numerator=a if isinstance(a, torch.Tensor) else None
+                )
 
         # Integer (and bool) results must match exactly. With the default
         # atol/rtol of 0.1 an fp32 round-trip error of a few units on values
@@ -12927,7 +12927,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             return torch.div(a, b, rounding_mode=rounding_mode)
 
         if isinstance(y, torch.Tensor):
-            _bound_divisor(y, numerator=x if isinstance(x, torch.Tensor) else None)
+            y = _bound_divisor(y, numerator=x if isinstance(x, torch.Tensor) else None)
 
         # floor/trunc division is exact integer arithmetic, so compare exactly.
         # At the default atol=rtol=0.1 an off-by-one quotient is tolerated for
@@ -12940,7 +12940,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_div_mixed_dtype_cpu(self, op, x, y):
         """Test torch.div type promotion across mixed tensor dtypes."""
         if isinstance(y, torch.Tensor):
-            _bound_divisor(y, numerator=x if isinstance(x, torch.Tensor) else None)
+            y = _bound_divisor(y, numerator=x if isinstance(x, torch.Tensor) else None)
         tol_kwargs = {"atol": 0, "rtol": 0} if op is _floor_div else {}
         self.compare_with_cpu(op, x, y, **tol_kwargs)
 
