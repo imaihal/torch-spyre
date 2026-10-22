@@ -8514,9 +8514,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "fp32_fp16_2d4x64": "Multi-arg pointwise with mixed EA",
                 # int32/int64 -> fp16 is stick-reordering, so the converted
                 # operand is staggered and meets the STANDARD fp16 one.
-                # floor_div_int32_fp16_1d256 is not listed: it is already in
-                # expect_fail (#5605) and the two markers are exclusive.
-                "true_div_int32_fp16_1d256": "Multi-arg pointwise with mixed EA",
+                "int32_fp16_1d256": "Multi-arg pointwise with mixed EA",
                 "fp16_int32_1d256": "Multi-arg pointwise with mixed EA",
                 "int32_fp16_2d4x64": "Multi-arg pointwise with mixed EA",
                 "int64_fp16_1d256": "Multi-arg pointwise with mixed EA",
@@ -8527,11 +8525,12 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 # blind the +-1 correction: when qf*y rounds back to x exactly,
                 # rem=0 and neither over_est nor under_est fires. Affects ~2.7%
                 # of random fp16 pairs that are exact on device and have
-                # |q|<=1024. This case pins one element of that class; #5605
-                "floor_div_int32_fp16_1d256": (
+                # |q|<=1024. This case pins the uniform pair 72.0 / 0.314453125
+                # (device 229, correct 228); #5605
+                "floor_div_fp16_fp16_1d256": (
                     "fp16 intermediate product rounding can zero the residual "
-                    "and blind the +-1 correction; this case pins one element "
-                    "of that class, #5605"
+                    "and blind the +-1 correction; this case pins the pair "
+                    "72.0 / 0.314453125 from that class, #5605"
                 ),
             },
             "param_sets": {
@@ -8551,6 +8550,15 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "fp32_fp16_2d4x64": (
                     cached_randn((4, 64), abs=True, scale=10.0, dtype=torch.float32),
                     cached_randn((4, 64), abs=True, scale=9.9, dtype=torch.float16),
+                ),
+                # Plain fp16/fp16 exhibit for #5605: no int operand, so no cast,
+                # no stagger and no EA question. Both values round-trip DL16
+                # exactly, and |q| = 228.97 is inside the 1024 ceiling, so the
+                # correct answer is representable. Uniform fill: every element
+                # is affected.
+                "fp16_fp16_1d256": (
+                    torch.full((256,), 72.0, dtype=torch.float16),
+                    torch.full((256,), 0.314453125, dtype=torch.float16),
                 ),
                 # int32 -> fp16 is unsupported on device: cast runs on the HOST
                 # (eager_fallback), the division then runs on device in fp16
