@@ -1613,6 +1613,35 @@ def test_strict_nd_transpose_clone(shape, dtype):
     _strict(lambda x: x.transpose(-2, -1).clone(), x)
 
 
+def test_strict_senuint32_transpose_clone():
+    """Cover the SENUINT32 entry of RESTICKIFY_SUPPORTED_DEVICE_DTYPES.
+
+    fp32 arrives at the restickify check as IEEE_FP32, and int32/int64 both as
+    IEEE_INT32, so none of the dtype-parametrized tests reach SENUINT32.  An
+    int64 tensor can be placed as SENUINT32 with an explicit layout (the
+    IEEE_INT64 -> SENUINT32 DCI conversion).
+    """
+    from torch_spyre._C import DataFormats, SpyreTensorLayout as _CSTL
+
+    x = torch.randint(0, 1000, (64, 64), dtype=torch.int64)
+    base = _CSTL(list(x.size()), torch.int64)
+    stl = _CSTL(list(base.device_size), list(base.stride_map), DataFormats.SENUINT32)
+    xd = x.to("spyre", device_layout=stl)
+    assert torch.equal(xd.cpu(), x), "SENUINT32 round trip is not exact"
+
+    torch._dynamo.reset_code_caches()
+    y = torch.compile(lambda a: a.t().clone())(xd)
+    assert torch.equal(y.cpu(), x.t())
+
+
+def test_restickify_int8_is_unsupported():
+    """Only RESTICKIFY_SUPPORTED_DEVICE_DTYPES waive the dtype check: an int8
+    restickify must stop with Unsupported, not reach the backend scheduler."""
+    x = torch.randint(-128, 127, (64, 64), dtype=torch.int8)
+    with pytest.raises(Exception, match=r"ReStickifyOpHBM on DataFormats\.SENINT8"):
+        _compile_and_run(lambda x: x.t().clone(), (x,), DEVICE)
+
+
 # transpose(1, -1).clone() swaps an inner batch dim with the stick dim, a
 # different demoted-middle geometry than transpose(-2, -1).
 SPLIT_T1_LAST = [
