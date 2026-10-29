@@ -1196,16 +1196,10 @@ def _get_data_format(op, device_dtype):
 
     This is metadata relabeling only; the underlying 32-bit data is unchanged.
     Native integer add/mul (``addi32toi32`` / ``muli32toi32``) use SENUINT32
-    tensor descriptors in the SDSC DDL.  Identity retains its fp32 relabeling.
+    tensor descriptors in the SDSC DDL.
     """
-    if device_dtype == DataFormats.IEEE_INT32:
-        if op in SPYRE_INT32_OPS:
-            return DataFormats.SENUINT32
-        if op == IDENTITY_OP:
-            # In the long term, SDSC should accept int32 as the data format.
-            # Such re-labeling will become unnecessary.
-            # See backend issue deeptools#4307.
-            return DataFormats.IEEE_FP32
+    if device_dtype == DataFormats.IEEE_INT32 and op in SPYRE_INT32_OPS:
+        return DataFormats.SENUINT32
     return device_dtype
 
 
