@@ -1738,8 +1738,7 @@ def _create_sdsc_tensors(
             )
 
         # Index tensors carry 32-bit integer indices; re-label as SENUINT32 since
-        # the backend's gather index conversion requires SENUINT32
-        # (GatherIndexConversion.cpp).
+        # the backend's gather index conversion requires SENUINT32.
         arg_data_format = (
             DataFormats.SENUINT32
             if (has_indirect_access and i in index_tensor_indices)
